@@ -1,0 +1,205 @@
+// DocuShield — Prisma schema
+// Supabase Postgres + pgvector. DATABASE_URL is the transaction-mode pooler;
+// DIRECT_URL is used only by Prisma migrations.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [pgvector(map: "vector")]
+}
+
+enum Plan {
+  free
+  pro
+  enterprise
+}
+
+enum Role {
+  admin
+  legal
+  viewer
+}
+
+enum SubscriptionStatus {
+  active
+  past_due
+  canceled
+}
+
+enum ContractStatus {
+  queued
+  extracting
+  embedding
+  classifying
+  ready
+  failed
+}
+
+enum IngestionStage {
+  extract
+  chunk
+  embed
+  classify
+}
+
+enum RiskLevel {
+  low
+  medium
+  high
+  pending
+}
+
+enum NotificationChannel {
+  slack
+  email
+}
+
+enum NotificationStatus {
+  pending
+  sent
+  failed
+}
+
+enum ActorType {
+  ai
+  human
+}
+
+model Workspace {
+  id           String        @id @default(uuid())
+  name         String
+  plan         Plan          @default(free)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  users        User[]
+  contracts    Contract[]
+  subscription Subscription?
+  @@map("workspaces")
+}
+
+model User {
+  id                String    @id @default(uuid())
+  workspaceId       String    @map("workspace_id")
+  email             String    @unique
+  passwordHash      String    @map("password_hash")
+  role              Role      @default(viewer)
+  oauthProvider     String?   @map("oauth_provider")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  workspace         Workspace @relation(fields: [workspaceId], references: [id])
+  uploadedContracts Contract[]
+  @@map("users")
+}
+
+model Subscription {
+  id                   String             @id @default(uuid())
+  workspaceId          String             @unique @map("workspace_id")
+  stripeCustomerId     String             @map("stripe_customer_id")
+  stripeSubscriptionId String             @map("stripe_subscription_id")
+  status               SubscriptionStatus @default(active)
+  currentPeriodEnd     DateTime           @map("current_period_end")
+  workspace            Workspace          @relation(fields: [workspaceId], references: [id])
+  @@map("subscriptions")
+}
+
+model Contract {
+  id               String         @id @default(uuid())
+  workspaceId      String         @map("workspace_id")
+  uploadedByUserId String         @map("uploaded_by_user_id")
+  fileName         String         @map("file_name")
+  fileHash         String         @map("file_hash")
+  fileUrl          String         @map("file_url")
+  status           ContractStatus @default(queued)
+  createdAt        DateTime       @default(now()) @map("created_at")
+  workspace        Workspace      @relation(fields: [workspaceId], references: [id])
+  uploadedBy       User           @relation(fields: [uploadedByUserId], references: [id])
+  clauses          Clause[]
+  ingestionJob     IngestionJob?
+  auditLogs        AuditLog[]
+  ragCache         RagQueryCache[]
+  @@unique([workspaceId, fileHash], name: "uniq_contract_per_workspace_hash")
+  @@map("contracts")
+}
+
+model IngestionJob {
+  id          String         @id @default(uuid())
+  contractId  String         @unique @map("contract_id")
+  bullmqJobId String         @map("bullmq_job_id")
+  stage       IngestionStage
+  attempts    Int            @default(0)
+  lastError   String?        @map("last_error")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+  contract    Contract       @relation(fields: [contractId], references: [id])
+  @@map("ingestion_jobs")
+}
+
+model Clause {
+  id              String                @id @default(uuid())
+  contractId      String                @map("contract_id")
+  clauseType      String                @map("clause_type")
+  clauseText      String                @map("clause_text")
+  pageNumber      Int                   @map("page_number")
+  embedding       Unsupported("vector(768)")
+  riskLevel       RiskLevel             @default(pending) @map("risk_level")
+  confidenceScore Float                 @map("confidence_score")
+  reasoning       String
+  contract        Contract              @relation(fields: [contractId], references: [id])
+  riskFlags       RiskFlag[]
+  auditLogs       AuditLog[]
+  @@map("clauses")
+}
+
+model RiskFlag {
+  id            String            @id @default(uuid())
+  clauseId      String            @map("clause_id")
+  contractId    String            @map("contract_id")
+  riskLevel     RiskLevel         @map("risk_level")
+  category      String
+  resolved      Boolean           @default(false)
+  createdAt     DateTime          @default(now()) @map("created_at")
+  clause        Clause            @relation(fields: [clauseId], references: [id])
+  notifications NotificationLog[]
+  @@map("risk_flags")
+}
+
+model NotificationLog {
+  id         String              @id @default(uuid())
+  riskFlagId String              @map("risk_flag_id")
+  channel    NotificationChannel
+  status     NotificationStatus  @default(pending)
+  retryCount Int                 @default(0) @map("retry_count")
+  sentAt     DateTime?           @map("sent_at")
+  riskFlag   RiskFlag            @relation(fields: [riskFlagId], references: [id])
+  @@map("notification_logs")
+}
+
+model AuditLog {
+  id         String     @id @default(uuid())
+  contractId String     @map("contract_id")
+  clauseId   String?    @map("clause_id")
+  action     String
+  riskLevel  RiskLevel? @map("risk_level")
+  confidence Float?
+  actorType  ActorType  @map("actor_type")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  contract   Contract   @relation(fields: [contractId], references: [id])
+  clause     Clause?    @relation(fields: [clauseId], references: [id])
+  @@map("audit_logs")
+}
+
+model RagQueryCache {
+  id                 String   @id @default(uuid())
+  contractId         String   @map("contract_id")
+  normalizedQuestion String   @map("normalized_question")
+  answer             String
+  sourceClauseIds    String   @map("source_clause_ids")
+  createdAt          DateTime @default(now()) @map("created_at")
+  expiresAt          DateTime @map("expires_at")
+  contract           Contract @relation(fields: [contractId], references: [id])
+  @@unique([contractId, normalizedQuestion], name: "uniq_cache_per_contract_question")
+  @@map("rag_query_cache")
+}

@@ -16,12 +16,16 @@ The **NestJS API Gateway** for DocuShield, an AI co-pilot for legal contract ris
 
 - 🔑 Role-based access control (Admin / Legal / Viewer) via decorator guards
 - 🔐 JWT issuing/verification + OAuth login flow
-- 💳 Stripe payments with signature-verified webhooks
+- 💳 Stripe payments with signature-verified webhooks (newest `2026-08-26.dahlia` API)
 - 📁 Upload validation — file-size caps, MIME checks
 - 🧬 SHA-256 content-hash dedupe (idempotent uploads, no double-billing)
-- 🚦 Two-tier rate limiting (per-IP + per-workspace)
-- 📬 Job queue producer — hands off valid, unique uploads to the AI service
+- 🚦 Two-tier rate limiting (per-IP + per-workspace), **Redis-backed** — scales across replicas
+- 🗄️ Redis caching for rule-engine decisions & RAG answers (cuts LLM calls, not just rate-limits them)
+- 📬 Job queue producer — hands off valid, unique uploads to the AI service via Redis/BullMQ (never synchronous)
+- 🧵 Structured pino logging with per-request correlation id propagated into BullMQ jobs
 - 🗄️ Prisma schema for workspaces, contracts, clauses, and risk flags (pgvector-ready for RAG)
+
+> **Embedding dimension (Part 7.1):** `Clause.embedding` is `vector(768)` — the output dimension of the Gemini embedding model used by the AI microservice. If the embedding model changes, this column and the migration must be updated together (dimension is baked into the column type, not row data).
 
 ## Getting Started
 
@@ -40,23 +44,61 @@ API runs at `http://localhost:4000`.
 
 | Variable | Description |
 |---|---|
-| `DATABASE_URL` | Supabase Postgres pooled (transaction-mode) connection string |
+| `DATABASE_URL` | Supabase Postgres **pooled** (transaction-mode) connection string — used at runtime |
+| `DIRECT_URL` | Supabase **direct** connection string — used only by `prisma migrate` |
+| `REDIS_URL` | Redis for job queue, rate limiting & caching |
 | `JWT_SECRET` | Secret for signing JWTs |
 | `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | OAuth provider credentials |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Stripe API + webhook signing |
-| `REDIS_URL` | Redis instance for rate limiting & job queue |
+| `STRIPE_PRICE_PRO` / `STRIPE_PRICE_ENTERPRISE` | Stripe Price IDs for each paid plan |
+| `PUBLIC_BASE_URL` | Canonical API origin for Stripe redirects |
+| `N8N_WEBHOOK_URL` | Annas's n8n workflow endpoint for payment-success events |
+| `RATE_LIMIT_IP_PER_MINUTE` / `RATE_LIMIT_WORKSPACE_PER_MINUTE` | Tier 1 / Tier 2 throttler limits |
+| `LOG_LEVEL` | pino log level (default `info`) |
 
 ## Project Structure
+
+Layered architecture: **Routes (Controllers) → Services → Repositories**, grouped into feature modules under `modules/`, with cross-cutting infra under `common/`.
+
+```text
 src/
-├── modules/
-│ ├── auth/ # JWT, OAuth, guards
-│ ├── uploads/ # Validation, idempotency, queue producer
-│ ├── payments/ # Stripe checkout, subscriptions, webhooks
-│ └── rate-limit/ # Throttler config
-├── prisma/ # Schema & migrations
-└── common/ # Shared decorators, filters, interceptors
+├── main.ts                       # bootstrap: pino logger, validation, CORS, rawBody
+├── app.module.ts                 # root wiring + global trace-id middleware
+├── common/                       # cross-cutting infra (all @Global)
+│   ├── logger/                   # pino structured logger + correlation-id (trace)
+│   │   ├── logger.module.ts
+│   │   ├── trace-context.service.ts
+│   │   └── trace-id.middleware.ts
+│   ├── cache/                    # Redis cache (rule-engine + RAG)
+│   │   ├── cache.module.ts
+│   │   └── redis-cache.service.ts
+│   └── rate-limit/               # Redis-backed two-tier throttler
+│       ├── rate-limit.module.ts
+│       └── workspace-throttler.guard.ts
+└── modules/                      # feature domains
+    ├── prisma/                   # PrismaService (global)
+    ├── workspaces/               # placeholder — Shanza's auth/RBAC
+    ├── contracts/
+    │   ├── controllers/          # upload, get, status routes
+    │   ├── services/             # business logic + queue producer call
+    │   ├── repositories/         # Prisma data access
+    │   └── validators/           # file MIME/size + sha256 hash
+    ├── subscriptions/
+    │   ├── controllers/          # checkout + stripe webhook (signature-verified)
+    │   ├── services/             # stripe.service.ts
+    │   └── dto/
+    ├── queue/
+    │   └── producers/            # ingestion producer (BullMQ)
+    └── notifications/            # n8n-webhook.client.ts
+```
 
 ## Testing
+
+```bash
+npm test            # unit + contract tests (Stripe signature, file validation, queue payload contract)
+```
+
+Load & integration tests live in the `load-tests/` and `postman/` folders once added.
 
 ```bash
 # Contract tests
