@@ -9,7 +9,14 @@ import {
 import type { Request } from 'express';
 import type { RawBodyRequest } from '@nestjs/common';
 import { StripeService } from '../services/stripe.service';
+import { Public } from '../../auth/decorators/public.decorator';
 
+/**
+ * Stripe calls this endpoint machine-to-machine and has no JWT to present, so
+ * it must sit outside the global auth guard. Its authenticity is established
+ * instead by the signature check below — that is the auth for this route.
+ */
+@Public()
 @Controller('subscriptions/webhook')
 export class StripeWebhookController {
   constructor(private readonly stripeService: StripeService) {}

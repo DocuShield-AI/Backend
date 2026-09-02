@@ -61,11 +61,17 @@ export class ContractsRepository {
     });
   }
 
+  /**
+   * Scoped by workspace on purpose. Filtering in the query rather than after
+   * the fetch means another tenant's row is never loaded at all, so it cannot
+   * leak through a log line or a later refactor that forgets the check.
+   */
   findByIdWithIngestion(
     contractId: string,
+    workspaceId: string,
   ): Promise<ContractWithIngestion | null> {
-    return this.prisma.contract.findUnique({
-      where: { id: contractId },
+    return this.prisma.contract.findFirst({
+      where: { id: contractId, workspaceId },
       include: { ingestionJob: true },
     });
   }
