@@ -1,9 +1,15 @@
 import { Module } from '@nestjs/common';
+import { WorkspacesController } from './controllers/workspaces.controller';
+import { WorkspacesService } from './services/workspaces.service';
 
 /**
- * Workspace domain. Placeholder — Shanza's auth/RBAC work builds here
- * (JwtAuthGuard / RolesGuard, workspace membership, per-workspace throttling
- * integration). The schema's `workspaces` table is already migrated.
+ * Workspace domain — tenancy reads that other modules can lean on. The
+ * per-workspace scoping of contracts lives in the contracts repository's query
+ * filter; this module covers the workspace's own data and membership.
  */
-@Module({})
+@Module({
+  controllers: [WorkspacesController],
+  providers: [WorkspacesService],
+  exports: [WorkspacesService],
+})
 export class WorkspacesModule {}

@@ -65,10 +65,18 @@ export class ContractsService {
     return Boolean(existing);
   }
 
+  /**
+   * 404 rather than 403 for another workspace's contract: a "forbidden" reply
+   * would confirm the id exists, which is itself a leak across tenants.
+   */
   async getContract(
     contractId: string,
+    workspaceId: string,
   ): Promise<ContractWithIngestion | null> {
-    const contract = await this.repository.findByIdWithIngestion(contractId);
+    const contract = await this.repository.findByIdWithIngestion(
+      contractId,
+      workspaceId,
+    );
     if (!contract) {
       throw new NotFoundException('Contract not found');
     }
@@ -81,8 +89,9 @@ export class ContractsService {
    */
   async getContractStatus(
     contractId: string,
+    workspaceId: string,
   ): Promise<{ status: ContractStatus; stage: string | null }> {
-    const contract = await this.getContract(contractId);
+    const contract = await this.getContract(contractId, workspaceId);
     if (!contract) {
       throw new NotFoundException('Contract not found');
     }
