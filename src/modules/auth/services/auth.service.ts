@@ -17,11 +17,19 @@ import {
   RefreshTokenPayload,
   TokenPair,
 } from '../auth.types';
+import { ChangePasswordDto } from '../dto/change-password.dto';
 import { LoginDto } from '../dto/login.dto';
 import { SignupDto } from '../dto/signup.dto';
 
 export interface AuthResult extends TokenPair {
-  user: { id: string; email: string; role: Role; workspaceId: string };
+  user: UserProfile;
+}
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  role: Role;
+  workspaceId: string;
 }
 
 @Injectable()
@@ -183,6 +191,59 @@ export class AuthService {
       `OAuth signup: user ${user.id} created workspace ${user.workspaceId} via ${profile.provider}`,
     );
     return this.buildResult(user);
+  }
+
+  /**
+   * Who the bearer of this token is. The claims alone would answer most of it,
+   * but not the email, and a read also confirms the account still exists —
+   * which claims cannot, since they are trusted for the token's whole life.
+   */
+  async profile(userId: string): Promise<UserProfile> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, role: true, workspaceId: true },
+    });
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+    return user;
+  }
+
+  /**
+   * Changes the caller's own password and ends every existing session.
+   *
+   * People change a password precisely when they think someone else has it, so
+   * leaving old sessions alive would defeat the point. A fresh pair is returned
+   * so the device doing the change stays signed in.
+   */
+  async changePassword(
+    userId: string,
+    dto: ChangePasswordDto,
+  ): Promise<TokenPair> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+
+    const ok = await this.password.compare(
+      dto.currentPassword,
+      user.passwordHash,
+    );
+    if (!ok) {
+      // Knowing the current password is what proves this is the account owner
+      // and not someone holding a stolen access token.
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: await this.password.hash(dto.newPassword) },
+    });
+
+    await this.refreshTokens.revokeAll(userId);
+    this.logger.log(`Password changed for user ${userId}; all sessions revoked`);
+
+    return this.issueTokens(user);
   }
 
   /** Ends one session. Other devices keep working. */

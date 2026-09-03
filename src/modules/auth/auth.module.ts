@@ -67,6 +67,6 @@ import { RolesGuard } from './guards/roles.guard';
   ],
   // PassportModule is re-exported so Phase 3's JwtAuthGuard can extend
   // AuthGuard('jwt') from anywhere without re-registering the strategy.
-  exports: [AuthService, PassportModule],
+  exports: [AuthService, PasswordService, PassportModule],
 })
 export class AuthModule {}

@@ -403,6 +403,109 @@ describe('AuthService', () => {
     });
   });
 
+  describe('profile', () => {
+    it('returns the signed-in account', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u_1',
+        email: 'legal@acme.com',
+        role: Role.legal,
+        workspaceId: 'ws_1',
+      });
+
+      await expect(service.profile('u_1')).resolves.toEqual({
+        id: 'u_1',
+        email: 'legal@acme.com',
+        role: Role.legal,
+        workspaceId: 'ws_1',
+      });
+    });
+
+    it('rejects a token whose account has since been deleted', async () => {
+      // Claims are trusted for the token's whole life, so only a read catches this.
+      prisma.user.findUnique.mockResolvedValue(null);
+      await expect(service.profile('u_gone')).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+
+    it('does not select the password hash', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        id: 'u_1',
+        email: 'legal@acme.com',
+        role: Role.admin,
+        workspaceId: 'ws_1',
+      });
+
+      await service.profile('u_1');
+
+      expect(
+        prisma.user.findUnique.mock.calls[0][0].select,
+      ).not.toHaveProperty('passwordHash');
+    });
+  });
+
+  describe('changePassword', () => {
+    const withPassword = async (plain: string) => {
+      const passwordHash = await password.hash(plain);
+      prisma.user.findUnique.mockResolvedValue(makeUser({ passwordHash }));
+      prisma.user.update = jest.fn().mockResolvedValue(makeUser());
+      return passwordHash;
+    };
+
+    it('stores a new hash that matches the new password', async () => {
+      await withPassword('old-password');
+
+      await service.changePassword('u_1', {
+        currentPassword: 'old-password',
+        newPassword: 'brand-new-password',
+      });
+
+      const stored = prisma.user.update.mock.calls[0][0].data.passwordHash;
+      await expect(password.compare('brand-new-password', stored)).resolves.toBe(
+        true,
+      );
+      await expect(password.compare('old-password', stored)).resolves.toBe(false);
+    });
+
+    it('refuses without the current password, so a stolen access token is not enough', async () => {
+      await withPassword('old-password');
+
+      await expect(
+        service.changePassword('u_1', {
+          currentPassword: 'wrong-guess',
+          newPassword: 'brand-new-password',
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('ends every other session, since a change usually means a suspected leak', async () => {
+      const { refreshToken: otherDevice } = await loginAs();
+      await withPassword('old-password');
+
+      await service.changePassword('u_1', {
+        currentPassword: 'old-password',
+        newPassword: 'brand-new-password',
+      });
+
+      await expect(service.refresh(otherDevice)).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+
+    it('returns a working pair so the device doing the change stays signed in', async () => {
+      await withPassword('old-password');
+
+      const pair = await service.changePassword('u_1', {
+        currentPassword: 'old-password',
+        newPassword: 'brand-new-password',
+      });
+
+      prisma.user.findUnique.mockResolvedValue(makeUser());
+      await expect(service.refresh(pair.refreshToken)).resolves.toBeDefined();
+    });
+  });
+
   describe('logout', () => {
     it('ends the session it was given and leaves other devices signed in', async () => {
       const { refreshToken: deviceA } = await loginAs();
