@@ -14,8 +14,14 @@ import { ThrottlerGuard } from '@nestjs/throttler';
 @Injectable()
 export class WorkspaceThrottlerGuard extends ThrottlerGuard {
   protected async getTracker(req: Record<string, any>): Promise<string> {
+    // Prefer the workspace from the verified JWT (set by JwtAuthGuard, which
+    // runs before the throttler). The x-workspace-id header is only a legacy
+    // fallback for unauthenticated routes and cannot be trusted alone —
+    // anyone can set it to any value and bypass the per-workspace limit.
     const workspaceId =
-      req?.headers?.['x-workspace-id'] ?? req?.workspaceId;
+      req?.user?.workspaceId ??
+      req?.workspaceId ??
+      req?.headers?.['x-workspace-id'];
     if (workspaceId) {
       return `workspace:${workspaceId}`;
     }

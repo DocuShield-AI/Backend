@@ -59,6 +59,7 @@ export class ContractsController {
   }
 
   @Get(':id')
+  @Roles(Role.admin, Role.legal, Role.viewer)
   getContract(
     @Param('id') id: string,
     @CurrentUser('workspaceId') workspaceId: string,
@@ -67,6 +68,7 @@ export class ContractsController {
   }
 
   @Get(':id/status')
+  @Roles(Role.admin, Role.legal, Role.viewer)
   getStatus(
     @Param('id') id: string,
     @CurrentUser('workspaceId') workspaceId: string,
