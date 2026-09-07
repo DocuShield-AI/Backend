@@ -1,4 +1,15 @@
-import { IsEmail, IsNotEmpty, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  IsEmail,
+  IsIn,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
+
+export type SignupType = 'create' | 'join';
 
 export class SignupDto {
   @IsEmail()
@@ -14,11 +25,31 @@ export class SignupDto {
   password: string;
 
   /**
-   * Signup creates the workspace as well as the user — the first account in a
-   * workspace becomes its admin, which is what gives RBAC something to check.
+   * create → a new workspace is made and this user becomes its admin (default,
+   * kept for backwards compatibility with existing clients).
+   * join   → user is added to an existing workspace via inviteCode.
    */
+  @IsOptional()
+  @IsIn(['create', 'join'])
+  type?: SignupType;
+
+  /**
+   * Only required for `type: 'create'`. The first account in a workspace
+   * becomes its admin, which is what gives RBAC something to check.
+   */
+  @ValidateIf((o: SignupDto) => (o.type ?? 'create') === 'create')
   @IsString()
   @IsNotEmpty()
   @MaxLength(100)
-  workspaceName: string;
+  workspaceName?: string;
+
+  /**
+   * Only required for `type: 'join'`. Consumed (single-use) when the user is
+   * added to the workspace with the role baked into the invite.
+   */
+  @ValidateIf((o: SignupDto) => o.type === 'join')
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  inviteCode?: string;
 }

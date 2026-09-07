@@ -77,6 +77,7 @@ export class AuthController {
   ): Promise<void> {
     const result = await this.authService.validateOAuthLogin(
       req.user as OAuthProfile,
+      parseOAuthState(req.query?.state)?.inviteCode,
     );
     const target =
       this.config.get<string>('OAUTH_SUCCESS_REDIRECT') ??
@@ -87,5 +88,24 @@ export class AuthController {
     }).toString();
 
     res.redirect(`${target}#${fragment}`);
+  }
+}
+
+/**
+ * Reads the invite code the `/auth/google?inviteCode=...` link put into
+ * Google's OAuth `state` parameter. Anything non-JSON or missing is treated as
+ * "no invite" so a broken state never breaks the login flow.
+ */
+function parseOAuthState(state: unknown): { inviteCode?: string } {
+  if (typeof state !== 'string' || state.length === 0) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(state) as { inviteCode?: unknown };
+    return typeof parsed.inviteCode === 'string' && parsed.inviteCode.length > 0
+      ? { inviteCode: parsed.inviteCode }
+      : {};
+  } catch {
+    return {};
   }
 }

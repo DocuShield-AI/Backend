@@ -30,4 +30,20 @@ export class GoogleOAuthGuard extends AuthGuard('google') {
     }
     return super.canActivate(context);
   }
+
+  /**
+   * A `/auth/google?inviteCode=CODE` link carries the code through the OAuth
+   * round-trip in the `state` parameter (Google echoes it back untouched). It
+   * is not a CSRF token here — the flow has no session yet — so carrying
+   * non-secret data in it is safe.
+   */
+  getAuthenticateOptions(context: ExecutionContext): { state?: string } {
+    const req = context.switchToHttp().getRequest();
+    const inviteCode = req.query?.inviteCode;
+    const state =
+      typeof inviteCode === 'string' && inviteCode.length > 0
+        ? JSON.stringify({ inviteCode })
+        : undefined;
+    return { state };
+  }
 }

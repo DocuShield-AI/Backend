@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -43,13 +44,33 @@ export class AuthService {
    * orphan workspace behind.
    */
   async signup(dto: SignupDto): Promise<AuthResult> {
+    // `type` defaults to create for backwards compatibility — a client that
+    // omits it gets a brand-new workspace exactly as before.
+    return dto.type === 'join'
+      ? this.joinWorkspaceWithInvite({
+          code: dto.inviteCode,
+          email: dto.email,
+          passwordHash: await this.password.hash(dto.password),
+        })
+      : this.createWorkspaceSignup(dto);
+  }
+
+  private async createWorkspaceSignup(dto: SignupDto): Promise<AuthResult> {
+    // Guarded by DTO validation; a direct service call still cannot write an
+    // empty workspace name into the database.
+    if (!dto.workspaceName) {
+      throw new BadRequestException(
+        'A workspace name is required to create a company',
+      );
+    }
+    const workspaceName: string = dto.workspaceName;
     const passwordHash = await this.password.hash(dto.password);
 
     let user: User;
     try {
       user = await this.prisma.$transaction(async (tx) => {
         const workspace = await tx.workspace.create({
-          data: { name: dto.workspaceName },
+          data: { name: workspaceName },
         });
         return tx.user.create({
           data: {
@@ -74,6 +95,78 @@ export class AuthService {
     }
 
     this.logger.log(`Signup: user ${user.id} created workspace ${user.workspaceId}`);
+    return this.buildResult(user);
+  }
+
+  /**
+   * Adds a user to an existing workspace via a single-use invite code, sharing
+   * the same code path for password signups and first-time OAuth logins.
+   *
+   * The invite is claimed atomically inside the same transaction that creates
+   * the user: `updateMany(where usedAt: null)` is the only consumer-wins
+   * primitive, so two simultaneous joins with the same code cannot both succeed
+   * and a crash in the middle cannot leave a usable code behind.
+   */
+  private async joinWorkspaceWithInvite(args: {
+    code?: string;
+    email: string;
+    passwordHash: string;
+    oauthProvider?: string;
+  }): Promise<AuthResult> {
+    const code = args.code?.trim();
+    if (!code) {
+      throw new BadRequestException('An invite code is required to join a company');
+    }
+
+    let user: User;
+    try {
+      user = await this.prisma.$transaction(async (tx) => {
+        const invite = await tx.invitation.findUnique({ where: { code } });
+        if (!invite) {
+          throw new BadRequestException('Invalid invite code');
+        }
+        if (invite.expiresAt < new Date()) {
+          throw new BadRequestException('Invite code has expired');
+        }
+
+        // Claim it before creating the user. If another join won the race this
+        // returns 0 matched rows and the candidate is thrown out.
+        const claimed = await tx.invitation.updateMany({
+          where: { id: invite.id, usedAt: null },
+          data: { usedAt: new Date() },
+        });
+        if (claimed.count !== 1) {
+          throw new BadRequestException('Invite code has already been used');
+        }
+
+        const created = await tx.user.create({
+          data: {
+            workspaceId: invite.workspaceId,
+            email: args.email.toLowerCase(),
+            passwordHash: args.passwordHash,
+            role: invite.role,
+            oauthProvider: args.oauthProvider ?? null,
+          },
+        });
+        await tx.invitation.update({
+          where: { id: invite.id },
+          data: { usedByUserId: created.id },
+        });
+        return created;
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        throw new ConflictException('An account with this email already exists');
+      }
+      throw err;
+    }
+
+    this.logger.log(
+      `Signup (join): user ${user.id} joined workspace ${user.workspaceId} as ${user.role}`,
+    );
     return this.buildResult(user);
   }
 
@@ -142,8 +235,15 @@ export class AuthService {
    * Matching is by email, which is only safe because the strategy refuses an
    * unverified address — otherwise anyone able to register that address with
    * the provider could walk into an existing account.
+   *
+   * A first-time visitor carrying an invite code joins that team's workspace
+   * instead of spawning a new one; an existing email always logs straight in
+   * (they already belong to a workspace, so the invite is irrelevant).
    */
-  async validateOAuthLogin(profile: OAuthProfile): Promise<AuthResult> {
+  async validateOAuthLogin(
+    profile: OAuthProfile,
+    inviteCode?: string,
+  ): Promise<AuthResult> {
     const email = profile.email.toLowerCase();
     const existing = await this.prisma.user.findUnique({ where: { email } });
 
@@ -158,6 +258,19 @@ export class AuthService {
           });
       this.logger.log(`OAuth login: user ${user.id} via ${profile.provider}`);
       return this.buildResult(user);
+    }
+
+    if (inviteCode) {
+      // First ever account for this email AND an invite was supplied: join the
+      // existing workspace with the role from the invite. The stored hash is of
+      // a value nobody holds, so the password route stays closed for this
+      // account until a real reset.
+      return this.joinWorkspaceWithInvite({
+        code: inviteCode,
+        email,
+        passwordHash: await this.password.hash(`${randomUUID()}${randomUUID()}`),
+        oauthProvider: profile.provider,
+      });
     }
 
     // A brand new account gets the same shape as signup: a workspace and its

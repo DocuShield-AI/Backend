@@ -1,4 +1,4 @@
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma, Role, User } from '@prisma/client';
@@ -202,6 +202,134 @@ describe('AuthService', () => {
     });
   });
 
+  describe('signup (join)', () => {
+    const invite = {
+      id: 'inv_1',
+      workspaceId: 'ws_1',
+      code: 'ABC123',
+      role: Role.legal,
+      expiresAt: new Date(Date.now() + 3600_000),
+      usedAt: null,
+    };
+
+    const makeJoinTx = (over: Record<string, unknown> = {}) => {
+      const invitationFindUnique = jest
+        .fn()
+        .mockResolvedValue({ ...invite, ...over });
+      const invitationUpdateMany = jest
+        .fn()
+        .mockResolvedValue({ count: 1 });
+      const userCreate = jest
+        .fn()
+        .mockResolvedValue(makeUser({ id: 'u_join', workspaceId: 'ws_1', role: Role.legal }));
+      const invitationUpdate = jest.fn().mockResolvedValue({});
+
+      prisma.$transaction.mockImplementation((cb: any) =>
+        cb({
+          invitation: {
+            findUnique: invitationFindUnique,
+            updateMany: invitationUpdateMany,
+            update: invitationUpdate,
+          },
+          user: { create: userCreate },
+        }),
+      );
+
+      return { invitationFindUnique, invitationUpdateMany, userCreate, invitationUpdate };
+    };
+
+    it('joins the invite workspace with the invite role, marking the code used', async () => {
+      const { userCreate, invitationUpdate } = makeJoinTx();
+
+      const result = await service.signup({
+        email: 'Teammate@Acme.com',
+        password: 'a-good-password',
+        type: 'join',
+        inviteCode: 'ABC123',
+      });
+
+      expect(userCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: 'ws_1',
+          email: 'teammate@acme.com',
+          role: Role.legal,
+          oauthProvider: null,
+        }),
+      });
+      expect(invitationUpdate).toHaveBeenCalledWith({
+        where: { id: 'inv_1' },
+        data: { usedByUserId: 'u_join' },
+      });
+      expect(result.user).toEqual(
+        expect.objectContaining({ id: 'u_join', workspaceId: 'ws_1', role: Role.legal }),
+      );
+    });
+
+    it('rejects when no invite code is supplied', async () => {
+      prisma.$transaction.mockImplementation(() => {
+        throw new Error('tx should not run');
+      });
+
+      await expect(
+        service.signup({
+          email: 'x@acme.com',
+          password: 'a-good-password',
+          type: 'join',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects an unknown invite code', async () => {
+      makeJoinTx();
+      prisma.$transaction.mockImplementation((cb: any) =>
+        cb({
+          invitation: { findUnique: jest.fn().mockResolvedValue(null) },
+          user: { create: jest.fn() },
+        }),
+      );
+
+      await expect(
+        service.signup({
+          email: 'x@acme.com',
+          password: 'a-good-password',
+          type: 'join',
+          inviteCode: 'NOPE',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects an expired invite', async () => {
+      makeJoinTx({
+        expiresAt: new Date(Date.now() - 1000),
+      });
+
+      await expect(
+        service.signup({
+          email: 'x@acme.com',
+          password: 'a-good-password',
+          type: 'join',
+          inviteCode: 'ABC123',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects an already-used invite (claim returns 0 rows)', async () => {
+      const { invitationUpdateMany } = makeJoinTx();
+      invitationUpdateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.signup({
+          email: 'x@acme.com',
+          password: 'a-good-password',
+          type: 'join',
+          inviteCode: 'ABC123',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      // No user should have been created when the claim lost the race.
+      expect(prisma.$transaction).toHaveBeenCalled();
+    });
+  });
+
   describe('login', () => {
     it('issues tokens carrying userId, workspaceId and role', async () => {
       const result = await loginAs(makeUser({ role: Role.legal }));
@@ -400,6 +528,46 @@ describe('AuthService', () => {
       await service.validateOAuthLogin({ ...googleProfile, email: 'legal@acme.com' });
 
       expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('joins a workspace via invite code on first sign-in instead of creating one', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      const userCreate = jest
+        .fn()
+        .mockResolvedValue(makeUser({ id: 'u_join', workspaceId: 'ws_1', role: Role.viewer }));
+      prisma.$transaction.mockImplementation((cb: any) =>
+        cb({
+          invitation: {
+            findUnique: jest
+              .fn()
+              .mockResolvedValue({
+                id: 'inv_1',
+                workspaceId: 'ws_1',
+                code: 'ABC123',
+                role: Role.viewer,
+                expiresAt: new Date(Date.now() + 3600_000),
+                usedAt: null,
+              }),
+            updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+            update: jest.fn().mockResolvedValue({}),
+          },
+          user: { create: userCreate },
+        }),
+      );
+
+      const result = await service.validateOAuthLogin(googleProfile, 'ABC123');
+
+      // No automatic workspace + admin — the invite's workspace and role win.
+      const created = userCreate.mock.calls[0][0].data;
+      expect(created).toEqual(
+        expect.objectContaining({
+          workspaceId: 'ws_1',
+          email: 'new@acme.com',
+          role: Role.viewer,
+          oauthProvider: 'google',
+        }),
+      );
+      expect(result.accessToken).toEqual(expect.any(String));
     });
   });
 

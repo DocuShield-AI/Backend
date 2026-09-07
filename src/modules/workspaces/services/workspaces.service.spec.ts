@@ -15,6 +15,51 @@ describe('WorkspacesService', () => {
     service = new WorkspacesService(prisma as PrismaService);
   });
 
+  describe('createInvite', () => {
+    it('creates a single-use code with the requested role and expiry', async () => {
+      prisma.workspace.findUnique.mockResolvedValue({ id: 'ws_1' });
+      prisma.invitation = { create: jest.fn() };
+
+      prisma.invitation.create.mockResolvedValue({
+        id: 'inv_1',
+        workspaceId: 'ws_1',
+        code: 'A1B2C3D4E5F6',
+        role: Role.legal,
+        expiresAt: '2026-09-14T00:00:00.000Z',
+        createdAt: '2026-09-07T00:00:00.000Z',
+      });
+
+      const result = await service.createInvite('ws_1', 'u_admin', {
+        role: Role.legal,
+        expiresInDays: 7,
+      });
+
+      expect(prisma.invitation.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          workspaceId: 'ws_1',
+          createdByUserId: 'u_admin',
+          role: Role.legal,
+        }),
+      });
+      // Code is derived from 6 random bytes => 12 upper-case hex chars.
+      expect(result.code).toMatch(/^[0-9A-F]{12}$/);
+      expect(result.role).toBe(Role.legal);
+      expect(result.expiresAt).toBe('2026-09-14T00:00:00.000Z');
+    });
+
+    it('404s when the workspace is unknown', async () => {
+      prisma.workspace.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.createInvite('ws_missing', 'u_admin', {
+          role: Role.viewer,
+          expiresInDays: 7,
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(prisma.invitation).toBeUndefined();
+    });
+  });
+
   describe('summary', () => {
     it('returns the workspace with its member count', async () => {
       const createdAt = new Date();

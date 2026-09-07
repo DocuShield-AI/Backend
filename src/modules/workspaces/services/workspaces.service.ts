@@ -1,6 +1,19 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { Plan, Role } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+
+export interface InviteInput {
+  role: Role;
+  expiresInDays: number;
+}
+
+export interface InviteResult {
+  code: string;
+  role: Role;
+  expiresAt: Date;
+  workspaceId: string;
+}
 
 export interface WorkspaceSummary {
   id: string;
@@ -71,5 +84,42 @@ export class WorkspacesService {
       select: { id: true },
     });
     return user !== null;
+  }
+
+  /**
+   * Generates a single-use invite for a teammate. The admin id comes from the
+   * verified token, and the workspace from the same token — neither trusts a
+   * request body or URL.
+   */
+  async createInvite(
+    workspaceId: string,
+    createdByUserId: string,
+    input: InviteInput,
+  ): Promise<InviteResult> {
+    const workspace = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { id: true },
+    });
+    if (!workspace) {
+      throw new NotFoundException('Workspace not found');
+    }
+
+    // 12 hex chars (48 bits of entropy) is plenty for a short-lived, single-use
+    // code and stays easy to read aloud / type into a join form.
+    const code = randomBytes(6).toString('hex').toUpperCase();
+    const expiresAt = new Date(
+      Date.now() + input.expiresInDays * 24 * 60 * 60 * 1000,
+    );
+
+    const invitation = await this.prisma.invitation.create({
+      data: { workspaceId, code, role: input.role, createdByUserId, expiresAt },
+    });
+
+    return {
+      code: invitation.code,
+      role: invitation.role,
+      expiresAt: invitation.expiresAt,
+      workspaceId: invitation.workspaceId,
+    };
   }
 }
