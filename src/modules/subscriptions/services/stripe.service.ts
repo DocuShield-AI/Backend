@@ -33,22 +33,28 @@ export class StripeService {
   async createCheckoutSession(dto: CreateCheckoutDto): Promise<CheckoutResult> {
     const baseUrl = this.config.get<string>('PUBLIC_BASE_URL') ?? 'http://localhost:4000';
 
-    const session = await this.stripe.checkout.sessions.create({
-      mode: 'subscription',
-      customer_email: undefined,
-      line_items: [
-        {
-          price: this.priceIdForPlan(dto.plan),
-          quantity: 1,
+    // Idempotency key = workspace + plan. A double-click on the pay button
+    // (or a frontend retry) reuses the same key, so Stripe returns the same
+    // session instead of creating a second chargeable one.
+    const session = await this.stripe.checkout.sessions.create(
+      {
+        mode: 'subscription',
+        customer_email: undefined,
+        line_items: [
+          {
+            price: this.priceIdForPlan(dto.plan),
+            quantity: 1,
+          },
+        ],
+        metadata: {
+          workspaceId: dto.workspaceId,
+          plan: dto.plan,
         },
-      ],
-      metadata: {
-        workspaceId: dto.workspaceId,
-        plan: dto.plan,
+        success_url: `${baseUrl}/subscriptions/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${baseUrl}/subscriptions/cancel`,
       },
-      success_url: `${baseUrl}/subscriptions/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/subscriptions/cancel`,
-    });
+      { idempotencyKey: `checkout-${dto.workspaceId}-${dto.plan}` },
+    );
 
     return { url: session.url as string, sessionId: session.id };
   }
