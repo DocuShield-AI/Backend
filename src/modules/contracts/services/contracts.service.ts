@@ -1,8 +1,9 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ContractStatus } from '@prisma/client';
+import { ContractStatus, Role } from '@prisma/client';
 import { IngestionProducer } from '../../queue/producers/ingestion.producer';
 import {
   ContractsRepository,
+  ContractListItem,
   ContractWithIngestion,
 } from '../repositories/contracts.repository';
 import { ValidatedFile } from '../validators/file-validator';
@@ -63,6 +64,22 @@ export class ContractsService {
   async isDuplicate(workspaceId: string, fileHash: string): Promise<boolean> {
     const existing = await this.repository.findByHash(workspaceId, fileHash);
     return Boolean(existing);
+  }
+
+  /**
+   * Dashboard list. Admins and legal see the whole workspace; viewers are
+   * read-only by definition and are scoped to their own uploads — the filter
+   * lives in the query, so another viewer's rows never reach the service.
+   */
+  listContracts(
+    workspaceId: string,
+    userId: string,
+    role: Role,
+  ): Promise<ContractListItem[]> {
+    return this.repository.list(
+      workspaceId,
+      role === Role.viewer ? userId : undefined,
+    );
   }
 
   /**

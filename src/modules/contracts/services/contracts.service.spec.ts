@@ -1,4 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
+import { Role } from '@prisma/client';
 
 // @nestjs/bullmq is ESM only and reaches this file through the producer import.
 // Same stand-in the ingestion producer spec already uses.
@@ -33,7 +34,7 @@ describe('ContractsService — workspace scoping', () => {
   };
 
   beforeEach(() => {
-    repository = { findByIdWithIngestion: jest.fn() };
+    repository = { findByIdWithIngestion: jest.fn(), list: jest.fn() };
     producer = { enqueue: jest.fn() };
     service = new ContractsService(
       repository as ContractsRepository,
@@ -89,5 +90,43 @@ describe('ContractsService — workspace scoping', () => {
     await expect(service.getContractStatus('c_1', 'ws_other')).rejects.toThrow(
       NotFoundException,
     );
+  });
+
+  describe('listContracts', () => {
+    it('shows the whole workspace to admins and legal', async () => {
+      repository.list.mockResolvedValue([]);
+
+      await service.listContracts('ws_1', 'u_1', Role.admin);
+      await service.listContracts('ws_1', 'u_1', Role.legal);
+
+      expect(repository.list).toHaveBeenCalledWith('ws_1', undefined);
+      expect(repository.list).toHaveBeenCalledTimes(2);
+    });
+
+    it('scopes viewers to their own uploads in the query', async () => {
+      repository.list.mockResolvedValue([]);
+
+      await service.listContracts('ws_1', 'u_1', Role.viewer);
+
+      expect(repository.list).toHaveBeenCalledWith('ws_1', 'u_1');
+    });
+
+    it('returns the lean dashboard shape with a floored stage', async () => {
+      repository.list.mockResolvedValue([
+        {
+          id: 'c_1',
+          fileName: 'nda.pdf',
+          status: 'queued',
+          stage: null,
+          uploadedByUserId: 'u_1',
+          createdAt: new Date(),
+        },
+      ]);
+
+      const rows = await service.listContracts('ws_1', 'u_1', Role.viewer);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).not.toHaveProperty('fileHash');
+      expect(rows[0]).not.toHaveProperty('fileUrl');
+    });
   });
 });

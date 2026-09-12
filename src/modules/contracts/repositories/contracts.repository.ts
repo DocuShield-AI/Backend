@@ -15,6 +15,16 @@ export interface ContractWithIngestion {
   } | null;
 }
 
+/** A dashboard row for `GET /contracts`. Lean on purpose — no file payload. */
+export interface ContractListItem {
+  id: string;
+  fileName: string;
+  status: string;
+  stage: string | null;
+  uploadedByUserId: string;
+  createdAt: Date;
+}
+
 @Injectable()
 export class ContractsRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -59,6 +69,41 @@ export class ContractsRepository {
       },
       select: { id: true },
     });
+  }
+
+  /**
+   * Dashboard list, toned down to what a row in a table needs. `uploadedByUserId`
+   * is optional so callers can scope a viewer to their own uploads in the query
+   * itself — another tenant's — or viewer's — rows are never loaded at all.
+   */
+  async list(
+    workspaceId: string,
+    uploadedByUserId?: string,
+  ): Promise<ContractListItem[]> {
+    const rows = await this.prisma.contract.findMany({
+      where: {
+        workspaceId,
+        ...(uploadedByUserId ? { uploadedByUserId } : {}),
+      },
+      select: {
+        id: true,
+        fileName: true,
+        status: true,
+        uploadedByUserId: true,
+        createdAt: true,
+        ingestionJob: { select: { stage: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      fileName: row.fileName,
+      status: row.status,
+      stage: row.ingestionJob?.stage ?? null,
+      uploadedByUserId: row.uploadedByUserId,
+      createdAt: row.createdAt,
+    }));
   }
 
   /**

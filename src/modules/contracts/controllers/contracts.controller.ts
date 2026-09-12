@@ -10,6 +10,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { memoryStorage } from 'multer';
 import { ContractsService } from '../services/contracts.service';
+import { ContractListItem } from '../repositories/contracts.repository';
 import { validateAndHashContract } from '../validators/file-validator';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { Roles } from '../../auth/decorators/roles.decorator';
@@ -56,6 +57,18 @@ export class ContractsController {
     });
 
     return { duplicate: false, contract };
+  }
+
+  @Get()
+  @Roles(Role.admin, Role.legal, Role.viewer)
+  listContracts(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<ContractListItem[]> {
+    return this.contractsService.listContracts(
+      user.workspaceId,
+      user.userId,
+      user.role,
+    );
   }
 
   @Get(':id')
