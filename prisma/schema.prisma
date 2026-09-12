@@ -95,6 +95,8 @@ model User {
   uploadedContracts Contract[]
   invitationsCreated Invitation[] @relation("InvitationCreatedBy")
   invitationsUsed    Invitation[] @relation("InvitationUsedBy")
+
+  @@index([workspaceId])
   @@map("users")
 }
 
@@ -116,6 +118,8 @@ model Invitation {
   workspace       Workspace @relation(fields: [workspaceId], references: [id])
   createdBy       User      @relation("InvitationCreatedBy", fields: [createdByUserId], references: [id])
   usedBy          User?     @relation("InvitationUsedBy", fields: [usedByUserId], references: [id])
+
+  @@index([workspaceId])
   @@map("invitations")
 }
 
@@ -127,6 +131,8 @@ model Subscription {
   status               SubscriptionStatus @default(active)
   currentPeriodEnd     DateTime           @map("current_period_end")
   workspace            Workspace          @relation(fields: [workspaceId], references: [id])
+
+  @@index([stripeSubscriptionId])
   @@map("subscriptions")
 }
 
@@ -171,9 +177,11 @@ model Clause {
   riskLevel       RiskLevel             @default(pending) @map("risk_level")
   confidenceScore Float                 @map("confidence_score")
   reasoning       String
-  contract        Contract              @relation(fields: [contractId], references: [id])
+contract        Contract        @relation(fields: [contractId], references: [id])
   riskFlags       RiskFlag[]
   auditLogs       AuditLog[]
+
+  @@index([contractId])
   @@map("clauses")
 }
 
@@ -187,6 +195,9 @@ model RiskFlag {
   createdAt     DateTime          @default(now()) @map("created_at")
   clause        Clause            @relation(fields: [clauseId], references: [id])
   notifications NotificationLog[]
+
+  @@index([clauseId])
+  @@index([contractId])
   @@map("risk_flags")
 }
 
@@ -198,6 +209,8 @@ model NotificationLog {
   retryCount Int                 @default(0) @map("retry_count")
   sentAt     DateTime?           @map("sent_at")
   riskFlag   RiskFlag            @relation(fields: [riskFlagId], references: [id])
+
+  @@index([riskFlagId])
   @@map("notification_logs")
 }
 
@@ -212,6 +225,9 @@ model AuditLog {
   createdAt  DateTime   @default(now()) @map("created_at")
   contract   Contract   @relation(fields: [contractId], references: [id])
   clause     Clause?    @relation(fields: [clauseId], references: [id])
+
+  @@index([contractId])
+  @@index([clauseId])
   @@map("audit_logs")
 }
 
