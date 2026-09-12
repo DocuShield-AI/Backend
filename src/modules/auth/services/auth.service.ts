@@ -12,6 +12,7 @@ import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PasswordService } from './password.service';
 import { RefreshTokenStore } from './refresh-token.store';
+import { RoleInvalidationStore } from './role-invalidation.store';
 import {
   JwtPayload,
   OAuthProfile,
@@ -35,6 +36,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly refreshTokens: RefreshTokenStore,
+    private readonly roleInvalidations: RoleInvalidationStore,
   ) {}
 
   /**
@@ -369,6 +371,10 @@ export class AuthService {
       jti,
       this.secondsUntil(decoded?.exp ?? 0),
     );
+
+    // A fresh token pair carries the current role in its claims, so any
+    // "role changed, re-read the DB" flag from earlier is now redundant.
+    await this.roleInvalidations.clear(user.id);
 
     return { accessToken, refreshToken };
   }

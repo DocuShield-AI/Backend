@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../../auth/auth.types';
 import { CreateInviteDto } from '../dto/create-invite.dto';
+import { UpdateRoleDto } from '../dto/update-role.dto';
 import {
   InviteResult,
   WorkspaceMember,
@@ -52,5 +53,20 @@ export class WorkspacesController {
       role: dto.role ?? Role.viewer,
       expiresInDays: dto.expiresInDays ?? 7,
     });
+  }
+
+  /**
+   * Admin changes a member's role. The member's token still carries the old
+   * role until it expires; the service flags the change so the very next
+   * request uses the fresh role (see RoleInvalidationStore).
+   */
+  @Patch('me/members/:userId/role')
+  @Roles(Role.admin)
+  updateRole(
+    @Param('userId') userId: string,
+    @Body() dto: UpdateRoleDto,
+    @CurrentUser('workspaceId') workspaceId: string,
+  ): Promise<WorkspaceMember> {
+    return this.workspaces.updateRole(workspaceId, userId, dto.role);
   }
 }

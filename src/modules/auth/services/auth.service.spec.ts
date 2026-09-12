@@ -7,6 +7,7 @@ import { RedisCacheService } from '../../../common/cache/redis-cache.service';
 import { AuthService } from './auth.service';
 import { PasswordService } from './password.service';
 import { RefreshTokenStore } from './refresh-token.store';
+import { RoleInvalidationStore } from './role-invalidation.store';
 import { JwtPayload } from '../auth.types';
 
 // @nestjs/config v12 ships ESM only, which Jest's CommonJS runtime cannot parse.
@@ -140,6 +141,10 @@ describe('AuthService', () => {
       jwt,
       config,
       store,
+      {
+        invalidate: jest.fn().mockResolvedValue(undefined),
+        clear: jest.fn().mockResolvedValue(undefined),
+      } as unknown as RoleInvalidationStore,
     );
   });
 

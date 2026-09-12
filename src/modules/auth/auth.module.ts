@@ -7,6 +7,7 @@ import { AuthController } from './controllers/auth.controller';
 import { AuthService } from './services/auth.service';
 import { PasswordService } from './services/password.service';
 import { RefreshTokenStore } from './services/refresh-token.store';
+import { RoleInvalidationStore } from './services/role-invalidation.store';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -42,6 +43,7 @@ import { RolesGuard } from './guards/roles.guard';
     PasswordService,
     JwtStrategy,
     RefreshTokenStore,
+    RoleInvalidationStore,
     // Order matters: authentication must populate req.user before the role
     // check reads it. Nest runs global guards in registration order.
     { provide: APP_GUARD, useClass: JwtAuthGuard },

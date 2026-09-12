@@ -1,7 +1,9 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'crypto';
 import { Plan, Role } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RoleInvalidationStore } from '../../auth/services/role-invalidation.store';
 
 export interface InviteInput {
   role: Role;
@@ -33,7 +35,11 @@ export interface WorkspaceMember {
 
 @Injectable()
 export class WorkspacesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+    private readonly roleInvalidations: RoleInvalidationStore,
+  ) {}
 
   /**
    * Every read here takes the workspace id from the caller's token, never from
@@ -121,5 +127,68 @@ export class WorkspacesService {
       expiresAt: invitation.expiresAt,
       workspaceId: invitation.workspaceId,
     };
+  }
+
+  /**
+   * Admin re-assigns a member's role. The target user is scoped to the caller's
+   * own workspace in the same query, so an admin can never demote or promote
+   * someone in another workspace.
+   *
+   * The token the member is carrying still says the old role (JWT claims are
+   * cached for up to JWT_EXPIRES_IN), so the role row is not touched without
+   * also flagging the user in RoleInvalidationStore — that flag makes
+   * JwtStrategy re-read this row on the very next request.
+   */
+  async updateRole(
+    workspaceId: string,
+    userId: string,
+    role: Role,
+  ): Promise<WorkspaceMember> {
+    const member = await this.prisma.user.findFirst({
+      where: { id: userId, workspaceId },
+      select: { id: true },
+    });
+    if (!member) {
+      throw new NotFoundException('User not found in this workspace');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { role },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        oauthProvider: true,
+        createdAt: true,
+      },
+    });
+
+    await this.roleInvalidations.invalidate(
+      userId,
+      this.accessTokenTtlSeconds(),
+    );
+    return updated;
+  }
+
+  /** The access token TTL, parsed from JWT_EXPIRES_IN, defaulting to 15m. */
+  private accessTokenTtlSeconds(): number {
+    const unitSeconds: Record<string, number> = {
+      s: 1,
+      m: 60,
+      h: 3600,
+      d: 86400,
+    };
+    const raw = (this.config.get<string>('JWT_EXPIRES_IN') ?? '15m').trim();
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) {
+      return Math.max(1, Math.floor(numeric));
+    }
+    const value = Number(raw.slice(0, -1));
+    const unit = raw[raw.length - 1];
+    if (Number.isNaN(value)) {
+      return 15 * 60;
+    }
+    return Math.max(1, Math.floor(value * (unitSeconds[unit] ?? 60)));
   }
 }

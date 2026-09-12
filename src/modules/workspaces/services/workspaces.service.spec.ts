@@ -1,18 +1,42 @@
 import { NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Plan, Role } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RoleInvalidationStore } from '../../auth/services/role-invalidation.store';
 import { WorkspacesService } from './workspaces.service';
+
+// @nestjs/config v12 ships ESM only, which Jest's CommonJS runtime cannot parse.
+jest.mock('@nestjs/config', () => ({
+  ConfigService: class ConfigService {},
+}));
 
 describe('WorkspacesService', () => {
   let prisma: any;
   let service: WorkspacesService;
 
+  const config = {
+    get: jest.fn(() => undefined),
+  } as unknown as ConfigService;
+
+  const roleInvalidations = {
+    invalidate: jest.fn().mockResolvedValue(undefined),
+  } as unknown as RoleInvalidationStore;
+
   beforeEach(() => {
+    jest.clearAllMocks();
     prisma = {
       workspace: { findUnique: jest.fn() },
-      user: { findMany: jest.fn(), findFirst: jest.fn() },
+      user: {
+        findMany: jest.fn(),
+        findFirst: jest.fn(),
+        update: jest.fn(),
+      },
     };
-    service = new WorkspacesService(prisma as PrismaService);
+    service = new WorkspacesService(
+      prisma as PrismaService,
+      config,
+      roleInvalidations,
+    );
   });
 
   describe('createInvite', () => {
@@ -126,6 +150,41 @@ describe('WorkspacesService', () => {
     it('is false for a user outside the workspace', async () => {
       prisma.user.findFirst.mockResolvedValue(null);
       await expect(service.isMember('u_1', 'ws_other')).resolves.toBe(false);
+    });
+  });
+
+  describe('updateRole', () => {
+    it('scopes the member lookup to the caller workspace and flags the change', async () => {
+      prisma.user.findFirst.mockResolvedValue({ id: 'u_1' });
+      prisma.user.update.mockResolvedValue({
+        id: 'u_1',
+        email: 'a@acme.com',
+        role: Role.legal,
+        oauthProvider: null,
+        createdAt: new Date(),
+      });
+
+      const out = await service.updateRole('ws_1', 'u_1', Role.legal);
+
+      expect(prisma.user.findFirst.mock.calls[0][0].where).toEqual({
+        id: 'u_1',
+        workspaceId: 'ws_1',
+      });
+      expect(roleInvalidations.invalidate).toHaveBeenCalledWith(
+        'u_1',
+        expect.any(Number),
+      );
+      expect(out.role).toBe(Role.legal);
+    });
+
+    it('404s and never flags a user outside the workspace', async () => {
+      prisma.user.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.updateRole('ws_1', 'u_other', Role.legal),
+      ).rejects.toThrow(NotFoundException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(roleInvalidations.invalidate).not.toHaveBeenCalled();
     });
   });
 });
