@@ -16,6 +16,7 @@ const userWith = (role: Role): AuthenticatedUser => ({
   userId: 'u_1',
   workspaceId: 'ws_1',
   role,
+  email: 'legal@acme.com',
 });
 
 describe('RolesGuard', () => {

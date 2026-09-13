@@ -7,6 +7,7 @@ const user: AuthenticatedUser = {
   userId: 'u_1',
   workspaceId: 'ws_1',
   role: Role.legal,
+  email: 'legal@acme.com',
 };
 
 const ctxWith = (value?: AuthenticatedUser): ExecutionContext =>
@@ -23,6 +24,7 @@ describe('@CurrentUser', () => {
     expect(currentUserFactory('workspaceId', ctxWith(user))).toBe('ws_1');
     expect(currentUserFactory('userId', ctxWith(user))).toBe('u_1');
     expect(currentUserFactory('role', ctxWith(user))).toBe(Role.legal);
+    expect(currentUserFactory('email', ctxWith(user))).toBe('legal@acme.com');
   });
 
   it('is undefined rather than throwing on an unauthenticated request', () => {

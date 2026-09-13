@@ -348,6 +348,7 @@ export class AuthService {
       sub: user.id,
       workspaceId: user.workspaceId,
       role: user.role,
+      email: user.email,
     };
     const jti = randomUUID();
 

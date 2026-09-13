@@ -1,7 +1,8 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Role } from '@prisma/client';
-import { JwtPayload } from '../auth.types';
+import type { Request } from 'express';
+import { ACCESS_TOKEN_COOKIE, JwtPayload } from '../auth.types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RoleInvalidationStore } from '../services/role-invalidation.store';
 
@@ -16,7 +17,49 @@ jest.mock('@nestjs/passport', () => ({
     },
 }));
 
-import { JwtStrategy } from './jwt.strategy';
+import { JwtStrategy, fromCookieOrBearer } from './jwt.strategy';
+
+const payloadWith = (over: Partial<JwtPayload> = {}): JwtPayload => ({
+  sub: 'u_1',
+  workspaceId: 'ws_1',
+  role: Role.legal,
+  email: 'legal@acme.com',
+  ...over,
+});
+
+const userWith = (over: Partial<Record<'id' | 'workspaceId' | 'role' | 'email', unknown>> = {}) => ({
+  id: 'u_1',
+  workspaceId: 'ws_1',
+  role: Role.legal,
+  email: 'legal@acme.com',
+  ...over,
+});
+
+describe('fromCookieOrBearer', () => {
+  const reqWith = (over: object) => ({ headers: {}, cookies: {}, ...over });
+
+  it('prefers the Authorization header when both are present', () => {
+    const req = reqWith({
+      headers: { authorization: 'Bearer header-token' },
+      cookies: { [ACCESS_TOKEN_COOKIE]: 'cookie-token' },
+    }) as unknown as Request;
+
+    expect(fromCookieOrBearer(req)).toBe('header-token');
+  });
+
+  it('falls back to the access-token cookie', () => {
+    const req = reqWith({
+      cookies: { [ACCESS_TOKEN_COOKIE]: 'cookie-token' },
+    }) as unknown as Request;
+
+    expect(fromCookieOrBearer(req)).toBe('cookie-token');
+  });
+
+  it('returns null when neither carries a token', () => {
+    const req = reqWith({}) as unknown as Request;
+    expect(fromCookieOrBearer(req)).toBeNull();
+  });
+});
 
 describe('JwtStrategy', () => {
   const config = {
@@ -40,16 +83,12 @@ describe('JwtStrategy', () => {
 
   it('maps token claims onto the shape guards and @CurrentUser expect', async () => {
     roles.isInvalidated = jest.fn(async () => false);
-    const payload: JwtPayload = {
-      sub: 'u_1',
-      workspaceId: 'ws_1',
-      role: Role.legal,
-    };
 
-    await expect(strategy.validate(payload)).resolves.toEqual({
+    await expect(strategy.validate(payloadWith())).resolves.toEqual({
       userId: 'u_1',
       workspaceId: 'ws_1',
       role: Role.legal,
+      email: 'legal@acme.com',
     });
     expect(prisma.user.findUnique).not.toHaveBeenCalled();
   });
@@ -58,27 +97,32 @@ describe('JwtStrategy', () => {
     roles.isInvalidated = jest.fn(async () => false);
 
     for (const role of [Role.admin, Role.legal, Role.viewer]) {
-      const out = await strategy.validate({ sub: 'u_1', workspaceId: 'ws_1', role });
+      const out = await strategy.validate(payloadWith({ role }));
       expect(out.role).toBe(role);
+      expect(out.email).toBe('legal@acme.com');
     }
   });
 
-  it('re-reads the fresh role from the DB for a flagged user', async () => {
+  it('re-reads the fresh role and email from the DB for a flagged user', async () => {
     roles.isInvalidated = jest.fn(async () => true);
-    prisma.user.findUnique = jest.fn().mockResolvedValue({
-      id: 'u_1',
+    prisma.user.findUnique = jest.fn().mockResolvedValue(
+      userWith({ id: 'u_1', role: Role.legal, email: 'renamed@acme.com' }),
+    );
+
+    const out = await strategy.validate(
+      payloadWith({ role: Role.admin, email: 'old@acme.com' }),
+    );
+
+    expect(out).toEqual({
+      userId: 'u_1',
       workspaceId: 'ws_1',
       role: Role.legal,
+      email: 'renamed@acme.com',
     });
-
-    const out = await strategy.validate({
-      sub: 'u_1',
-      workspaceId: 'ws_1',
-      role: Role.admin,
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { id: 'u_1' },
+      select: expect.anything(),
     });
-
-    expect(out).toEqual({ userId: 'u_1', workspaceId: 'ws_1', role: Role.legal });
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { id: 'u_1' }, select: expect.anything() });
   });
 
   it('treats a flagged user whose account is gone as unauthorized', async () => {
@@ -86,7 +130,7 @@ describe('JwtStrategy', () => {
     prisma.user.findUnique = jest.fn().mockResolvedValue(null);
 
     await expect(
-      strategy.validate({ sub: 'u_ghost', workspaceId: 'ws_1', role: Role.admin }),
+      strategy.validate(payloadWith({ sub: 'u_ghost' })),
     ).rejects.toThrow(UnauthorizedException);
   });
 

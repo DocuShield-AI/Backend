@@ -9,22 +9,28 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Request, Response } from 'express';
-import type { OAuthProfile } from '../auth.types';
-import { GoogleOAuthGuard } from '../guards/google-oauth.guard';
+import type { CookieOptions, Request, Response } from 'express';
+import { CurrentUser } from '../decorators/current-user.decorator';
 import { Public } from '../decorators/public.decorator';
+import { GoogleOAuthGuard } from '../guards/google-oauth.guard';
+import { ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE } from '../auth.types';
+import type {
+  AuthenticatedUser,
+  OAuthProfile,
+  TokenPair,
+} from '../auth.types';
 import { AuthService, AuthResult } from '../services/auth.service';
-import { TokenPair } from '../auth.types';
 import { LoginDto } from '../dto/login.dto';
 import { RefreshDto } from '../dto/refresh.dto';
 import { SignupDto } from '../dto/signup.dto';
 
 /**
- * Public auth surface. @Public() sits on the controller because every route
- * here authenticates by its own means — requiring a token to log in would be
- * circular.
+ * Public auth surface. @Public() sits on each route because every one here
+ * authenticates by its own means — requiring a token to log in would be
+ * circular. The one exception is GET /auth/me, which deliberately stays
+ * protected so the browser can ask "who am I?" and get the answer out of the
+ * httpOnly cookie it cannot read itself.
  */
-@Public()
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -32,32 +38,137 @@ export class AuthController {
     private readonly config: ConfigService,
   ) {}
 
+  private sessionCookieOptions(maxAge: number): CookieOptions {
+    return {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: this.config.get<string>('NODE_ENV') === 'production',
+      path: '/',
+      maxAge,
+    };
+  }
+
+  /**
+   * Adds the fresh token pair to the response as httpOnly cookies. The browser
+   * stores them and sends them back automatically; the SPA never has to touch
+   * a token (and nothing falls into XSS's reach). The max-ages mirror the JWT
+   * lifetimes from env, computed lazily so they always read current config.
+   */
+  private setSessionCookies(res: Response, pair: TokenPair): void {
+    res.cookie(
+      ACCESS_TOKEN_COOKIE,
+      pair.accessToken,
+      this.sessionCookieOptions(this.envSeconds('JWT_EXPIRES_IN', '15m')),
+    );
+    res.cookie(
+      REFRESH_TOKEN_COOKIE,
+      pair.refreshToken,
+      this.sessionCookieOptions(this.envSeconds('JWT_REFRESH_EXPIRES_IN', '7d')),
+    );
+  }
+
+  private clearSessionCookies(res: Response): void {
+    // clearCookie only matches if path (and other attrs) mirror the original.
+    res.clearCookie(ACCESS_TOKEN_COOKIE, { path: '/' });
+    res.clearCookie(REFRESH_TOKEN_COOKIE, { path: '/' });
+  }
+
+  /**
+   * A tiny ms-pattern parser ("15m", "7d", "2h") used only to set a cookie
+   * max-age that mirrors the JWT lifetime. The token's own exp is still what
+   * actually enforces expiry — this just keeps the cookie from outliving it.
+   */
+  private envSeconds(key: string, fallback: string): number {
+    const raw = this.config.get<string>(key) ?? fallback;
+    return this.parseMs(raw) ?? this.parseMs(fallback) ?? 900;
+  }
+
+  private parseMs(value: string): number | null {
+    const match = /^(\d+)(ms|s|m|h|d)$/.exec(value.trim());
+    if (!match) {
+      return null;
+    }
+    const n = Number(match[1]);
+    const msPerUnit = {
+      d: 86_400_000,
+      h: 3_600_000,
+      m: 60_000,
+      s: 1_000,
+      ms: 1,
+    } as const;
+    const unit = match[2] as keyof typeof msPerUnit;
+    return Math.floor((n * msPerUnit[unit]) / 1000);
+  }
+
+  @Public()
   @Post('signup')
-  signup(@Body() dto: SignupDto): Promise<AuthResult> {
-    return this.authService.signup(dto);
+  async signup(
+    @Body() dto: SignupDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ user: AuthResult['user'] }> {
+    const result = await this.authService.signup(dto);
+    this.setSessionCookies(res, result);
+    return { user: result.user };
   }
 
   // 200 rather than the default 201: logging in does not create a resource.
+  @Public()
   @Post('login')
   @HttpCode(200)
-  login(@Body() dto: LoginDto): Promise<AuthResult> {
-    return this.authService.login(dto);
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ user: AuthResult['user'] }> {
+    const result = await this.authService.login(dto);
+    this.setSessionCookies(res, result);
+    return { user: result.user };
   }
 
+  /**
+   * Rotates the refresh token. The presented refresh token comes from the
+   * httpOnly cookie first; a body fallback keeps scripted clients working.
+   */
+  @Public()
   @Post('refresh')
   @HttpCode(200)
-  refresh(@Body() dto: RefreshDto): Promise<TokenPair> {
-    return this.authService.refresh(dto.refreshToken);
+  async refresh(
+    @Req() req: Request,
+    @Body() dto: RefreshDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    const presented: string =
+      dto.refreshToken ?? req.cookies?.[REFRESH_TOKEN_COOKIE] ?? '';
+    const pair = await this.authService.refresh(presented);
+    this.setSessionCookies(res, pair);
   }
 
   // 204: the session is gone, there is nothing to return.
+  @Public()
   @Post('logout')
   @HttpCode(204)
-  logout(@Body() dto: RefreshDto): Promise<void> {
-    return this.authService.logout(dto.refreshToken);
+  async logout(
+    @Req() req: Request,
+    @Body() dto: RefreshDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    const presented: string =
+      dto.refreshToken ?? req.cookies?.[REFRESH_TOKEN_COOKIE] ?? '';
+    await this.authService.logout(presented);
+    this.clearSessionCookies(res);
+  }
+
+  /**
+   * Who am I? Protected by the global JWT guard, so the user is read off the
+   * access-token cookie (or Authorization header). The SPA calls this on boot
+   * to learn who is signed in — the one thing HTTP-only cookies hide from JS.
+   */
+  @Get('me')
+  me(@CurrentUser() user: AuthenticatedUser): { user: AuthenticatedUser } {
+    return { user };
   }
 
   /** Kicks off the Google flow; passport issues the redirect. */
+  @Public()
   @Get('google')
   @UseGuards(GoogleOAuthGuard)
   googleAuth(): void {
@@ -65,10 +176,11 @@ export class AuthController {
   }
 
   /**
-   * Where Google sends the browser back. Tokens are handed over in the URL
-   * fragment rather than the query string: fragments are never sent to a
-   * server, so they stay out of access logs and Referer headers.
+   * Where Google sends the browser back. The token pair is written into
+   * httpOnly cookies and the browser is sent to the SPA, whose /auth/callback
+   * page simply records that the session exists.
    */
+  @Public()
   @Get('google/callback')
   @UseGuards(GoogleOAuthGuard)
   async googleCallback(
@@ -82,12 +194,8 @@ export class AuthController {
     const target =
       this.config.get<string>('OAUTH_SUCCESS_REDIRECT') ??
       'http://localhost:3000/auth/callback';
-    const fragment = new URLSearchParams({
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
-    }).toString();
-
-    res.redirect(`${target}#${fragment}`);
+    this.setSessionCookies(res, result);
+    res.redirect(target);
   }
 }
 

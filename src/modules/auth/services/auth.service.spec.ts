@@ -336,7 +336,7 @@ describe('AuthService', () => {
   });
 
   describe('login', () => {
-    it('issues tokens carrying userId, workspaceId and role', async () => {
+    it('issues tokens carrying userId, workspaceId, role and email', async () => {
       const result = await loginAs(makeUser({ role: Role.legal }));
 
       const claims = jwt.verify<JwtPayload>(result.accessToken, {
@@ -345,6 +345,7 @@ describe('AuthService', () => {
       expect(claims.sub).toBe('u_1');
       expect(claims.workspaceId).toBe('ws_1');
       expect(claims.role).toBe(Role.legal);
+      expect(claims.email).toBe('legal@acme.com');
     });
 
     it('rejects a wrong password', async () => {

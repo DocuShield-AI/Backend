@@ -1,10 +1,24 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
+import type { Request } from 'express';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RoleInvalidationStore } from '../services/role-invalidation.store';
-import { AuthenticatedUser, JwtPayload } from '../auth.types';
+import { ACCESS_TOKEN_COOKIE, AuthenticatedUser, JwtPayload } from '../auth.types';
+
+/**
+ * Pulls the access token out of the request. The Authorization header is tried
+ * first (keeps curl/Postman and any non-browser caller working); httpOnly
+ * cookies are the primary channel for the browser SPA.
+ */
+export function fromCookieOrBearer(req: Request): string | null {
+  const bearer = ExtractJwt.fromAuthHeaderAsBearerToken()(req);
+  if (bearer) {
+    return bearer;
+  }
+  return req.cookies?.[ACCESS_TOKEN_COOKIE] ?? null;
+}
 
 /**
  * Verifies the Bearer access token and shapes `req.user`.
@@ -25,7 +39,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     private readonly roles: RoleInvalidationStore,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      jwtFromRequest: fromCookieOrBearer,
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>('JWT_SECRET'),
     });
@@ -37,12 +51,13 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         userId: payload.sub,
         workspaceId: payload.workspaceId,
         role: payload.role,
+        email: payload.email,
       };
     }
 
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, workspaceId: true, role: true },
+      select: { id: true, workspaceId: true, role: true, email: true },
     });
     if (!user) {
       // Token is signed correctly but the account is gone — treat it like a
@@ -53,6 +68,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       userId: user.id,
       workspaceId: user.workspaceId,
       role: user.role,
+      email: user.email,
     };
   }
 }
