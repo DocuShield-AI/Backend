@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { StripeService } from './stripe.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { N8nWebhookClient } from '../../notifications/n8n-webhook.client';
+import { RedisCacheService } from '../../../common/cache/redis-cache.service';
 
 jest.mock('@nestjs/config', () => ({
   ConfigService: class ConfigService {},
@@ -53,6 +54,10 @@ describe('StripeService', () => {
     };
 
     n8n = { notifyPaymentSuccess: jest.fn().mockResolvedValue(undefined) };
+    const cache = {
+      exists: jest.fn().mockResolvedValue(false),
+      set: jest.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -60,6 +65,7 @@ describe('StripeService', () => {
         { provide: ConfigService, useValue: config },
         { provide: PrismaService, useValue: prisma },
         { provide: N8nWebhookClient, useValue: n8n },
+        { provide: RedisCacheService, useValue: cache },
       ],
     }).compile();
 
@@ -117,8 +123,23 @@ describe('StripeService', () => {
   describe('handleEvent / checkout completion', () => {
     it('is a no-op for unhandled event types', async () => {
       await expect(
-        service.handleEvent({ type: 'ping' } as Stripe.Event),
+        service.handleEvent({ type: 'ping' } as unknown as Stripe.Event),
       ).resolves.toBeUndefined();
+      expect(prisma.subscription.upsert).not.toHaveBeenCalled();
+    });
+
+    it('skips an event that was already handled', async () => {
+      const event = {
+        id: 'evt_dup',
+        type: 'checkout.session.completed',
+        data: { object: { id: 'cs_1' } },
+      } as unknown as Stripe.Event;
+      (service as unknown as { cache: { exists: jest.Mock } }).cache.exists.mockResolvedValueOnce(
+        true,
+      );
+
+      await service.handleEvent(event);
+
       expect(prisma.subscription.upsert).not.toHaveBeenCalled();
     });
 
@@ -134,7 +155,6 @@ describe('StripeService', () => {
       const sub: Partial<Stripe.Subscription> = {
         id: 'sub_x',
         status: 'active',
-        current_period_end: undefined,
         billing_schedules: [
           {
             applies_to: null,

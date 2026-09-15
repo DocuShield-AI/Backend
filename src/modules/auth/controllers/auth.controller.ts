@@ -9,11 +9,13 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Throttle } from '@nestjs/throttler';
 import type { CookieOptions, Request, Response } from 'express';
 import { CurrentUser } from '../decorators/current-user.decorator';
 import { Public } from '../decorators/public.decorator';
 import { GoogleOAuthGuard } from '../guards/google-oauth.guard';
 import { ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE } from '../auth.types';
+import { parseDurationToSeconds } from '../../../common/utils/parse-duration';
 import type {
   AuthenticatedUser,
   OAuthProfile,
@@ -25,11 +27,10 @@ import { RefreshDto } from '../dto/refresh.dto';
 import { SignupDto } from '../dto/signup.dto';
 
 /**
- * Public auth surface. @Public() sits on each route because every one here
- * authenticates by its own means — requiring a token to log in would be
- * circular. The one exception is GET /auth/me, which deliberately stays
- * protected so the browser can ask "who am I?" and get the answer out of the
- * httpOnly cookie it cannot read itself.
+ * Public auth surface. Every route here authenticates by its own means, so
+ * needing a token to log in would be circular — hence @Public() per route.
+ * GET /auth/me deliberately stays protected: the browser asks "who am I?"
+ * through the httpOnly cookie it cannot read itself.
  */
 @Controller('auth')
 export class AuthController {
@@ -48,12 +49,8 @@ export class AuthController {
     };
   }
 
-  /**
-   * Adds the fresh token pair to the response as httpOnly cookies. The browser
-   * stores them and sends them back automatically; the SPA never has to touch
-   * a token (and nothing falls into XSS's reach). The max-ages mirror the JWT
-   * lifetimes from env, computed lazily so they always read current config.
-   */
+  // httpOnly cookies keep tokens out of XSS's reach; max-ages mirror the JWT
+  // lifetimes so the browser aligns with the real expiry.
   private setSessionCookies(res: Response, pair: TokenPair): void {
     res.cookie(
       ACCESS_TOKEN_COOKIE,
@@ -73,31 +70,11 @@ export class AuthController {
     res.clearCookie(REFRESH_TOKEN_COOKIE, { path: '/' });
   }
 
-  /**
-   * A tiny ms-pattern parser ("15m", "7d", "2h") used only to set a cookie
-   * max-age that mirrors the JWT lifetime. The token's own exp is still what
-   * actually enforces expiry — this just keeps the cookie from outliving it.
-   */
+  // Cookie max-age mirrors the JWT lifetime; the token's own exp enforces expiry.
   private envSeconds(key: string, fallback: string): number {
     const raw = this.config.get<string>(key) ?? fallback;
-    return this.parseMs(raw) ?? this.parseMs(fallback) ?? 900;
-  }
-
-  private parseMs(value: string): number | null {
-    const match = /^(\d+)(ms|s|m|h|d)$/.exec(value.trim());
-    if (!match) {
-      return null;
-    }
-    const n = Number(match[1]);
-    const msPerUnit = {
-      d: 86_400_000,
-      h: 3_600_000,
-      m: 60_000,
-      s: 1_000,
-      ms: 1,
-    } as const;
-    const unit = match[2] as keyof typeof msPerUnit;
-    return Math.floor((n * msPerUnit[unit]) / 1000);
+    const seconds = parseDurationToSeconds(raw);
+    return Number.isFinite(seconds) ? Math.max(1, Math.floor(seconds)) : 900;
   }
 
   @Public()
@@ -111,10 +88,12 @@ export class AuthController {
     return { user: result.user };
   }
 
-  // 200 rather than the default 201: logging in does not create a resource.
+  // Tighter per-IP cap on the credential route to slow brute force. 200 rather
+  // than the default 201: logging in does not create a resource.
   @Public()
   @Post('login')
   @HttpCode(200)
+  @Throttle({ ip: { ttl: 60_000, limit: 10 } })
   async login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) res: Response,
@@ -124,10 +103,7 @@ export class AuthController {
     return { user: result.user };
   }
 
-  /**
-   * Rotates the refresh token. The presented refresh token comes from the
-   * httpOnly cookie first; a body fallback keeps scripted clients working.
-   */
+  // Cookie first, body fallback keeps scripted clients working.
   @Public()
   @Post('refresh')
   @HttpCode(200)
@@ -157,11 +133,8 @@ export class AuthController {
     this.clearSessionCookies(res);
   }
 
-  /**
-   * Who am I? Protected by the global JWT guard, so the user is read off the
-   * access-token cookie (or Authorization header). The SPA calls this on boot
-   * to learn who is signed in — the one thing HTTP-only cookies hide from JS.
-   */
+  // Who am I? Reads the user off the access-token cookie; the SPA calls this on
+  // boot because httpOnly cookies are the one thing JS cannot see.
   @Get('me')
   me(@CurrentUser() user: AuthenticatedUser): { user: AuthenticatedUser } {
     return { user };
@@ -175,11 +148,8 @@ export class AuthController {
     // Intentionally empty — the guard redirects before this runs.
   }
 
-  /**
-   * Where Google sends the browser back. The token pair is written into
-   * httpOnly cookies and the browser is sent to the SPA, whose /auth/callback
-   * page simply records that the session exists.
-   */
+  // Writes the new token pair into cookies and sends the browser to the SPA,
+  // whose /auth/callback page simply records that a session now exists.
   @Public()
   @Get('google/callback')
   @UseGuards(GoogleOAuthGuard)
@@ -199,11 +169,7 @@ export class AuthController {
   }
 }
 
-/**
- * Reads the invite code the `/auth/google?inviteCode=...` link put into
- * Google's OAuth `state` parameter. Anything non-JSON or missing is treated as
- * "no invite" so a broken state never breaks the login flow.
- */
+/** Stashes inviteCode in Google's OAuth `state`; broken state means "no invite". */
 function parseOAuthState(state: unknown): { inviteCode?: string } {
   if (typeof state !== 'string' || state.length === 0) {
     return {};

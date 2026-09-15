@@ -136,23 +136,6 @@ describe('WorkspacesService', () => {
     });
   });
 
-  describe('isMember', () => {
-    it('matches on user and workspace together, not either alone', async () => {
-      prisma.user.findFirst.mockResolvedValue({ id: 'u_1' });
-
-      await expect(service.isMember('u_1', 'ws_1')).resolves.toBe(true);
-      expect(prisma.user.findFirst.mock.calls[0][0].where).toEqual({
-        id: 'u_1',
-        workspaceId: 'ws_1',
-      });
-    });
-
-    it('is false for a user outside the workspace', async () => {
-      prisma.user.findFirst.mockResolvedValue(null);
-      await expect(service.isMember('u_1', 'ws_other')).resolves.toBe(false);
-    });
-  });
-
   describe('updateRole', () => {
     it('scopes the member lookup to the caller workspace and flags the change', async () => {
       prisma.user.findFirst.mockResolvedValue({ id: 'u_1' });

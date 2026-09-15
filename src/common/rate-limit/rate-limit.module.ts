@@ -6,9 +6,8 @@ import { APP_GUARD } from '@nestjs/core';
 import { WorkspaceThrottlerGuard } from './workspace-throttler.guard';
 
 /**
- * Two-tier, Redis-backed rate limiting (Part 4.1). In-memory throttling is
- * rejected because it silently doubles the limit when the API scales to 2+
- * replicas. Both tiers share one Redis counter store.
+ * Two-tier, Redis-backed rate limiting. In-memory throttling is rejected
+ * because it silently doubles the limit when the API scales to 2+ replicas.
  */
 @Global()
 @Module({

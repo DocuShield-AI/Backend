@@ -11,7 +11,7 @@ export interface IngestionJobPayload {
   fileUrl: string;
   fileHash: string;
   /**
-   * Correlation id that also flows into the Python consumer's logs (Part 4.10).
+   * Correlation id forwarded to the Python consumer so its logs line up with ours.
    */
   traceId?: string;
 }

@@ -1,11 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Param,
-  UploadedFile,
-  UseInterceptors,
-} from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { memoryStorage } from 'multer';
@@ -15,6 +8,7 @@ import { validateAndHashContract } from '../validators/file-validator';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import type { AuthenticatedUser } from '../../auth/auth.types';
+import { ListContractsQueryDto } from '../dto/list-contracts-query.dto';
 
 @Controller('contracts')
 export class ContractsController {
@@ -22,70 +16,48 @@ export class ContractsController {
 
   @Post('upload')
   @UseInterceptors(
-    FileInterceptor('file', {
-      storage: memoryStorage(),
-      limits: { fileSize: 25 * 1024 * 1024 },
-    }),
+    FileInterceptor('file', { storage: memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } }),
   )
-  // Viewers are read-only by definition, so uploading is limited to the two
-  // roles that act on contracts.
   @Roles(Role.admin, Role.legal)
-  async upload(
-    @UploadedFile() file: Express.Multer.File,
-    @CurrentUser() user: AuthenticatedUser,
-  ) {
+  async upload(@UploadedFile() file: Express.Multer.File, @CurrentUser() user: AuthenticatedUser) {
     const { fileName, fileHash } = validateAndHashContract(file);
 
-    // Both ids come from the verified token. They are real rows, which is what
-    // stops the contracts.workspace_id / uploaded_by_user_id foreign keys from
-    // rejecting the insert.
-    const workspaceId = user.workspaceId;
-    const uploadedByUserId = user.userId;
-
-    const isDuplicate = await this.contractsService.isDuplicate(
-      workspaceId,
-      fileHash,
-    );
-    if (isDuplicate) {
+    if (await this.contractsService.isDuplicate(user.workspaceId, fileHash)) {
       return { duplicate: true, message: 'File already uploaded' };
     }
 
     const contract = await this.contractsService.uploadContract({
-      workspaceId,
-      uploadedByUserId,
+      workspaceId: user.workspaceId,
+      uploadedByUserId: user.userId,
       file: { fileName, mimeType: file.mimetype, fileHash },
     });
-
     return { duplicate: false, contract };
   }
 
   @Get()
   @Roles(Role.admin, Role.legal, Role.viewer)
   listContracts(
+    @Query() query: ListContractsQueryDto,
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<ContractListItem[]> {
     return this.contractsService.listContracts(
       user.workspaceId,
       user.userId,
       user.role,
+      query.cursor,
+      query.limit,
     );
   }
 
   @Get(':id')
   @Roles(Role.admin, Role.legal, Role.viewer)
-  getContract(
-    @Param('id') id: string,
-    @CurrentUser('workspaceId') workspaceId: string,
-  ) {
+  getContract(@Param('id') id: string, @CurrentUser('workspaceId') workspaceId: string) {
     return this.contractsService.getContract(id, workspaceId);
   }
 
   @Get(':id/status')
   @Roles(Role.admin, Role.legal, Role.viewer)
-  getStatus(
-    @Param('id') id: string,
-    @CurrentUser('workspaceId') workspaceId: string,
-  ) {
+  getStatus(@Param('id') id: string, @CurrentUser('workspaceId') workspaceId: string) {
     return this.contractsService.getContractStatus(id, workspaceId);
   }
 }

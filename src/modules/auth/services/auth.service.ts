@@ -39,15 +39,9 @@ export class AuthService {
     private readonly roleInvalidations: RoleInvalidationStore,
   ) {}
 
-  /**
-   * Creates a workspace and its first user together, in one transaction. They
-   * are inseparable: `User.workspaceId` is a non-null foreign key, so a user
-   * without a workspace cannot exist, and a half-applied signup would leave an
-   * orphan workspace behind.
-   */
+  // A user cannot exist without a workspace (non-null FK), so both are created
+  // atomically.
   async signup(dto: SignupDto): Promise<AuthResult> {
-    // `type` defaults to create for backwards compatibility — a client that
-    // omits it gets a brand-new workspace exactly as before.
     return dto.type === 'join'
       ? this.joinWorkspaceWithInvite({
           code: dto.inviteCode,
@@ -58,8 +52,6 @@ export class AuthService {
   }
 
   private async createWorkspaceSignup(dto: SignupDto): Promise<AuthResult> {
-    // Guarded by DTO validation; a direct service call still cannot write an
-    // empty workspace name into the database.
     if (!dto.workspaceName) {
       throw new BadRequestException(
         'A workspace name is required to create a company',
@@ -85,8 +77,8 @@ export class AuthService {
         });
       });
     } catch (err) {
-      // Relying on the unique index rather than a pre-check, so two concurrent
-      // signups for the same email cannot both pass a lookup and then collide.
+      // Unique index, not a pre-check: two concurrent signups for one email
+      // cannot both pass a lookup and then collide.
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === 'P2002'
@@ -101,13 +93,10 @@ export class AuthService {
   }
 
   /**
-   * Adds a user to an existing workspace via a single-use invite code, sharing
-   * the same code path for password signups and first-time OAuth logins.
-   *
-   * The invite is claimed atomically inside the same transaction that creates
-   * the user: `updateMany(where usedAt: null)` is the only consumer-wins
-   * primitive, so two simultaneous joins with the same code cannot both succeed
-   * and a crash in the middle cannot leave a usable code behind.
+   * Adds a user to an existing workspace via a single-use invite. The invite is
+   * claimed atomically inside the same transaction that creates the user:
+   * `updateMany(where usedAt: null)` is the only consumer-wins primitive, so two
+   * simultaneous joins with the same code cannot both succeed.
    */
   private async joinWorkspaceWithInvite(args: {
     code?: string;
@@ -131,8 +120,7 @@ export class AuthService {
           throw new BadRequestException('Invite code has expired');
         }
 
-        // Claim it before creating the user. If another join won the race this
-        // returns 0 matched rows and the candidate is thrown out.
+        // Claim before creating the user; 0 matched rows means another join won.
         const claimed = await tx.invitation.updateMany({
           where: { id: invite.id, usedAt: null },
           data: { usedAt: new Date() },
@@ -177,8 +165,7 @@ export class AuthService {
       where: { email: dto.email.toLowerCase() },
     });
 
-    // Both branches return the same error on purpose — distinguishing "no such
-    // email" from "wrong password" would let anyone enumerate registered users.
+    // Same message for both cases, so logins cannot be used to enumerate emails.
     const ok =
       user !== null &&
       (await this.password.compare(dto.password, user.passwordHash));
@@ -191,19 +178,15 @@ export class AuthService {
 
   /**
    * Exchanges a refresh token for a fresh pair and retires the one presented,
-   * so each refresh token is usable exactly once.
-   *
-   * A token that was already rotated away and then reappears cannot have come
-   * from a well-behaved client, so it is treated as a leaked copy and every
-   * session for the user is dropped. A token that is merely unknown — logged
-   * out, expired — is just rejected.
+   * so each token is usable exactly once. A token that was already rotated away
+   * and reappears cannot come from a well-behaved client — treat it as leaked
+   * and drop every session for the user. A merely unknown token is just a
+   * stale client.
    */
   async refresh(refreshToken: string): Promise<TokenPair> {
     const payload = await this.verifyRefreshToken(refreshToken);
 
     if (!(await this.refreshTokens.isValid(payload.sub, payload.jti))) {
-      // Only a token that was rotated away counts as a leak. One that is simply
-      // unknown — logged out, expired — is a stale client, not an attacker.
       if (await this.refreshTokens.wasSpent(payload.sub, payload.jti)) {
         this.logger.warn(
           `Refresh-token replay detected for user ${payload.sub}; revoking all sessions`,
@@ -213,8 +196,8 @@ export class AuthService {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
-    // Re-read the user so a deleted account, or one whose role changed, cannot
-    // keep refreshing on claims baked into an old token.
+    // Re-read the user so a deleted account, or a role change, cannot keep
+    // refreshing on claims baked into an old token.
     const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
     if (!user) {
       await this.refreshTokens.revokeAll(payload.sub);
@@ -233,14 +216,9 @@ export class AuthService {
 
   /**
    * Signs in through an OAuth provider, creating the account on first visit.
-   *
-   * Matching is by email, which is only safe because the strategy refuses an
-   * unverified address — otherwise anyone able to register that address with
-   * the provider could walk into an existing account.
-   *
-   * A first-time visitor carrying an invite code joins that team's workspace
-   * instead of spawning a new one; an existing email always logs straight in
-   * (they already belong to a workspace, so the invite is irrelevant).
+   * Matching by email is safe only because the strategy rejects unverified
+   * addresses. First-time visitors carrying an invite join that team instead
+   * of spawning a new workspace.
    */
   async validateOAuthLogin(
     profile: OAuthProfile,
@@ -250,8 +228,7 @@ export class AuthService {
     const existing = await this.prisma.user.findUnique({ where: { email } });
 
     if (existing) {
-      // First OAuth sign-in for an account that was created with a password:
-      // record the provider, but leave the password working.
+      // Attach the provider on the first OAuth login; the password keeps working.
       const user = existing.oauthProvider
         ? existing
         : await this.prisma.user.update({
@@ -263,9 +240,7 @@ export class AuthService {
     }
 
     if (inviteCode) {
-      // First ever account for this email AND an invite was supplied: join the
-      // existing workspace with the role from the invite. The stored hash is of
-      // a value nobody holds, so the password route stays closed for this
+      // Hash of a value nobody holds: the password route stays closed for this
       // account until a real reset.
       return this.joinWorkspaceWithInvite({
         code: inviteCode,
@@ -275,9 +250,6 @@ export class AuthService {
       });
     }
 
-    // A brand new account gets the same shape as signup: a workspace and its
-    // first admin. The stored hash is of a value nobody holds, so the password
-    // route stays permanently closed for this account until a real reset.
     const passwordHash = await this.password.hash(`${randomUUID()}${randomUUID()}`);
     const user = await this.prisma.$transaction(async (tx) => {
       const workspace = await tx.workspace.create({
@@ -335,13 +307,10 @@ export class AuthService {
   }
 
   /**
-   * Access and refresh tokens are signed with two different secrets, so a
-   * leaked access token cannot be replayed against the refresh endpoint to mint
-   * an endless supply of new ones.
-   *
-   * Only the refresh token is recorded server-side. The access token stays
-   * deliberately stateless — checking a store on every API call would put the
-   * whole app on Redis for its hot path; its 15-minute life is the bound.
+   * Access and refresh tokens are signed with separate secrets, so a leaked
+   * access token cannot be replayed against the refresh endpoint. Only the
+   * refresh token is recorded server-side; the access token stays stateless
+   * (its ~15m lifetime is the bound).
    */
   private async issueTokens(user: User): Promise<TokenPair> {
     const payload: JwtPayload = {
@@ -364,8 +333,7 @@ export class AuthService {
       ),
     ]);
 
-    // The token's own `exp` decides how long the record lives, so the two can
-    // never drift apart the way a separately-parsed TTL would.
+    // The token's own `exp` decides the record's TTL so the two never drift apart.
     const decoded = this.jwt.decode(refreshToken) as RefreshTokenPayload | null;
     await this.refreshTokens.remember(
       user.id,

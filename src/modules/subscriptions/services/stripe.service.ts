@@ -1,9 +1,17 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { PrismaService } from '../../prisma/prisma.service';
 import { N8nWebhookClient } from '../../notifications/n8n-webhook.client';
-import { CreateCheckoutDto } from '../dto/create-checkout.dto';
+import { RedisCacheService } from '../../../common/cache/redis-cache.service';
+import { SubscriptionStatus } from '@prisma/client';
+
+const WEBHOOK_DEDUP_TTL_SECONDS = 60 * 60 * 24;
+
+export interface CheckoutInput {
+  workspaceId: string;
+  plan: 'pro' | 'enterprise';
+}
 
 export interface CheckoutResult {
   url: string;
@@ -12,58 +20,43 @@ export interface CheckoutResult {
 
 @Injectable()
 export class StripeService {
-  private readonly stripe: Stripe;
+  private readonly logger = new Logger(StripeService.name);
+  private stripe: Stripe;
   private readonly webhookSecret: string;
 
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly n8n: N8nWebhookClient,
+    private readonly cache: RedisCacheService,
   ) {
     const key = this.config.getOrThrow<string>('STRIPE_SECRET_KEY');
     this.webhookSecret = this.config.getOrThrow<string>('STRIPE_WEBHOOK_SECRET');
     this.stripe = new Stripe(key, { apiVersion: '2026-08-26.dahlia' });
   }
 
-  private priceIdForPlan(plan: CreateCheckoutDto['plan']): string {
-    const key = `STRIPE_PRICE_${plan.toUpperCase()}`;
-    return this.config.getOrThrow<string>(key);
+  private priceIdForPlan(plan: CheckoutInput['plan']): string {
+    return this.config.getOrThrow<string>(`STRIPE_PRICE_${plan.toUpperCase()}`);
   }
 
-  async createCheckoutSession(dto: CreateCheckoutDto): Promise<CheckoutResult> {
+  async createCheckoutSession(input: CheckoutInput): Promise<CheckoutResult> {
     const baseUrl = this.config.get<string>('PUBLIC_BASE_URL') ?? 'http://localhost:4000';
 
-    // Idempotency key = workspace + plan. A double-click on the pay button
-    // (or a frontend retry) reuses the same key, so Stripe returns the same
-    // session instead of creating a second chargeable one.
     const session = await this.stripe.checkout.sessions.create(
       {
         mode: 'subscription',
-        customer_email: undefined,
-        line_items: [
-          {
-            price: this.priceIdForPlan(dto.plan),
-            quantity: 1,
-          },
-        ],
-        metadata: {
-          workspaceId: dto.workspaceId,
-          plan: dto.plan,
-        },
+        line_items: [{ price: this.priceIdForPlan(input.plan), quantity: 1 }],
+        metadata: { workspaceId: input.workspaceId, plan: input.plan },
         success_url: `${baseUrl}/subscriptions/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${baseUrl}/subscriptions/cancel`,
       },
-      { idempotencyKey: `checkout-${dto.workspaceId}-${dto.plan}` },
+      // Reuse the same session when the same workspace+plan is requested again.
+      { idempotencyKey: `checkout-${input.workspaceId}-${input.plan}` },
     );
 
     return { url: session.url as string, sessionId: session.id };
   }
 
-  /**
-   * Verifies the raw Stripe webhook payload against the signature header.
-   * Throws (and lets Nest return a 400) when the signature is invalid or
-   * the payload has been tampered with.
-   */
   async verifyWebhookSignature(
     payload: Buffer | string,
     signature: string | undefined,
@@ -71,33 +64,33 @@ export class StripeService {
     if (!signature) {
       throw new Error('Missing Stripe signature header');
     }
-    return this.stripe.webhooks.constructEvent(
-      payload,
-      signature,
-      this.webhookSecret,
-    );
+    return this.stripe.webhooks.constructEvent(payload, signature, this.webhookSecret);
   }
 
   /**
-   * Handles a verified event. The payment-success event is the trigger Annas's
-   * n8n automation listens for — its payload shape is documented in
-   * docs/webhooks.md.
+   * Stripe can deliver the same event more than once (retries). The event id is
+   * recorded only after the handler succeeds, so a mid-way failure keeps the
+   * event unmarked and a retry can still process it.
    */
   async handleEvent(event: Stripe.Event): Promise<void> {
+    const dedupKey = `stripe:event:${event.id}`;
+    if (await this.cache.exists(dedupKey)) {
+      return;
+    }
+
     switch (event.type) {
-      case 'checkout.session.completed': {
+      case 'checkout.session.completed':
         await this.onCheckoutCompleted(event.data.object as Stripe.Checkout.Session);
         break;
-      }
       case 'customer.subscription.updated':
-      case 'customer.subscription.deleted': {
+      case 'customer.subscription.deleted':
         await this.onSubscriptionChanged(event.data.object as Stripe.Subscription);
         break;
-      }
       default:
-        // Ignored event types are a no-op.
-        break;
+        return;
     }
+
+    await this.cache.set(dedupKey, '1', WEBHOOK_DEDUP_TTL_SECONDS);
   }
 
   private async onCheckoutCompleted(session: Stripe.Checkout.Session): Promise<void> {
@@ -105,6 +98,10 @@ export class StripeService {
     const plan = session.metadata?.plan as 'pro' | 'enterprise' | undefined;
 
     if (!workspaceId || !session.subscription) {
+      return;
+    }
+    if (!plan) {
+      this.logger.warn(`Checkout ${session.id} missing plan metadata`);
       return;
     }
 
@@ -133,16 +130,22 @@ export class StripeService {
       },
     });
 
-    if (plan) {
-      await this.prisma.workspace.update({
+    await this.prisma.workspace
+      .update({
         where: { id: workspaceId },
         data: { plan },
-      }).catch(() => undefined);
-    }
+      })
+      .catch((err: unknown) => {
+        this.logger.error(
+          `Failed to upgrade workspace ${workspaceId} to plan ${plan}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
 
     await this.n8n.notifyPaymentSuccess({
       workspaceId,
-      plan: plan ?? 'pro',
+      plan,
       stripeCustomerId: session.customer as string,
       stripeSubscriptionId: subscriptionId,
       currentPeriodEnd: currentPeriodEnd.toISOString(),
@@ -158,7 +161,7 @@ export class StripeService {
       return;
     }
 
-    const status =
+    const status: SubscriptionStatus =
       subscription.status === 'canceled'
         ? 'canceled'
         : subscription.status === 'past_due'
@@ -167,17 +170,13 @@ export class StripeService {
 
     await this.prisma.subscription.update({
       where: { id: record.id },
-      data: {
-        status,
-        currentPeriodEnd: this.periodEndOf(subscription),
-      },
+      data: { status, currentPeriodEnd: this.periodEndOf(subscription) },
     });
   }
 
   /**
-   * Resolves the current billing period end (as a Date) from the subscription.
    * The 2026-08-26.dahlia API removed the top-level `current_period_end` field
-   * in favour of `billing_schedules[].bill_until`; we fall back to the billing
+   * in favour of `billing_schedules[].bill_until`; falls back to the billing
    * cycle anchor when no schedule is present.
    */
   private periodEndOf(subscription: Stripe.Subscription): Date {

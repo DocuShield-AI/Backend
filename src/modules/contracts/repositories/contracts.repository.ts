@@ -10,12 +10,9 @@ export interface ContractWithIngestion {
   fileUrl: string;
   status: string;
   createdAt: Date;
-  ingestionJob?: {
-    stage: string;
-  } | null;
+  ingestionJob?: { stage: string } | null;
 }
 
-/** A dashboard row for `GET /contracts`. Lean on purpose — no file payload. */
 export interface ContractListItem {
   id: string;
   fileName: string;
@@ -37,54 +34,35 @@ export class ContractsRepository {
     fileUrl: string;
   }) {
     return this.prisma.contract.create({
-      data: {
-        workspaceId: input.workspaceId,
-        uploadedByUserId: input.uploadedByUserId,
-        fileName: input.fileName,
-        fileHash: input.fileHash,
-        fileUrl: input.fileUrl,
-        status: 'queued',
-      },
+      data: { ...input, status: 'queued' },
     });
   }
 
-  createIngestionJob(input: {
-    contractId: string;
-    bullmqJobId: string;
-  }) {
+  createIngestionJob(input: { contractId: string; bullmqJobId: string }) {
     return this.prisma.ingestionJob.create({
-      data: {
-        contractId: input.contractId,
-        bullmqJobId: input.bullmqJobId,
-        stage: 'extract',
-        attempts: 0,
-      },
+      data: { contractId: input.contractId, bullmqJobId: input.bullmqJobId, stage: 'extract', attempts: 0 },
     });
   }
 
   findByHash(workspaceId: string, fileHash: string) {
     return this.prisma.contract.findUnique({
-      where: {
-        uniq_contract_per_workspace_hash: { workspaceId, fileHash },
-      },
+      where: { uniq_contract_per_workspace_hash: { workspaceId, fileHash } },
       select: { id: true },
     });
   }
 
-  /**
-   * Dashboard list, toned down to what a row in a table needs. `uploadedByUserId`
-   * is optional so callers can scope a viewer to their own uploads in the query
-   * itself — another tenant's — or viewer's — rows are never loaded at all.
-   */
+  remove(id: string) {
+    return this.prisma.contract.delete({ where: { id } });
+  }
+
   async list(
     workspaceId: string,
     uploadedByUserId?: string,
+    cursor?: string,
+    limit = 20,
   ): Promise<ContractListItem[]> {
     const rows = await this.prisma.contract.findMany({
-      where: {
-        workspaceId,
-        ...(uploadedByUserId ? { uploadedByUserId } : {}),
-      },
+      where: { workspaceId, ...(uploadedByUserId ? { uploadedByUserId } : {}) },
       select: {
         id: true,
         fileName: true,
@@ -94,9 +72,13 @@ export class ContractsRepository {
         ingestionJob: { select: { stage: true } },
       },
       orderBy: { createdAt: 'desc' },
-      take: 100,
+      take: limit + 1,
+      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
     });
-    return rows.map((row) => ({
+
+    const hasNext = rows.length > limit;
+    const items = hasNext ? rows.slice(0, limit) : rows;
+    return items.map((row) => ({
       id: row.id,
       fileName: row.fileName,
       status: row.status,
@@ -106,11 +88,6 @@ export class ContractsRepository {
     }));
   }
 
-  /**
-   * Scoped by workspace on purpose. Filtering in the query rather than after
-   * the fetch means another tenant's row is never loaded at all, so it cannot
-   * leak through a log line or a later refactor that forgets the check.
-   */
   findByIdWithIngestion(
     contractId: string,
     workspaceId: string,

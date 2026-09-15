@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 import { Plan, Role } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RoleInvalidationStore } from '../../auth/services/role-invalidation.store';
+import { parseDurationToSeconds } from '../../../common/utils/parse-duration';
 
 export interface InviteInput {
   role: Role;
@@ -41,11 +42,8 @@ export class WorkspacesService {
     private readonly roleInvalidations: RoleInvalidationStore,
   ) {}
 
-  /**
-   * Every read here takes the workspace id from the caller's token, never from
-   * a route parameter — there is deliberately no "fetch workspace X" method for
-   * a controller to accidentally call with someone else's id.
-   */
+  // Workspace id always comes from the caller's token, never from a route param
+  // or body, so cross-tenant lookup is structurally impossible.
   async summary(workspaceId: string): Promise<WorkspaceSummary> {
     const workspace = await this.prisma.workspace.findUnique({
       where: { id: workspaceId },
@@ -65,38 +63,14 @@ export class WorkspacesService {
   }
 
   listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+    // passwordHash is never selected, so it cannot escape through this route.
     return this.prisma.user.findMany({
       where: { workspaceId },
-      // passwordHash is never selected, so it cannot escape through this route.
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        oauthProvider: true,
-        createdAt: true,
-      },
+      select: { id: true, email: true, role: true, oauthProvider: true, createdAt: true },
       orderBy: { createdAt: 'asc' },
     });
   }
 
-  /**
-   * Defence in depth for anything that cannot rely on a query filter. Token
-   * claims are trusted for 15 minutes (see JwtStrategy), so a membership that
-   * was revoked inside that window is only caught by an explicit check.
-   */
-  async isMember(userId: string, workspaceId: string): Promise<boolean> {
-    const user = await this.prisma.user.findFirst({
-      where: { id: userId, workspaceId },
-      select: { id: true },
-    });
-    return user !== null;
-  }
-
-  /**
-   * Generates a single-use invite for a teammate. The admin id comes from the
-   * verified token, and the workspace from the same token — neither trusts a
-   * request body or URL.
-   */
   async createInvite(
     workspaceId: string,
     createdByUserId: string,
@@ -110,12 +84,9 @@ export class WorkspacesService {
       throw new NotFoundException('Workspace not found');
     }
 
-    // 12 hex chars (48 bits of entropy) is plenty for a short-lived, single-use
-    // code and stays easy to read aloud / type into a join form.
+    // 12 hex chars (48 bits of entropy) is plenty for a short-lived single-use code.
     const code = randomBytes(6).toString('hex').toUpperCase();
-    const expiresAt = new Date(
-      Date.now() + input.expiresInDays * 24 * 60 * 60 * 1000,
-    );
+    const expiresAt = new Date(Date.now() + input.expiresInDays * 24 * 60 * 60 * 1000);
 
     const invitation = await this.prisma.invitation.create({
       data: { workspaceId, code, role: input.role, createdByUserId, expiresAt },
@@ -130,14 +101,9 @@ export class WorkspacesService {
   }
 
   /**
-   * Admin re-assigns a member's role. The target user is scoped to the caller's
-   * own workspace in the same query, so an admin can never demote or promote
-   * someone in another workspace.
-   *
-   * The token the member is carrying still says the old role (JWT claims are
-   * cached for up to JWT_EXPIRES_IN), so the role row is not touched without
-   * also flagging the user in RoleInvalidationStore — that flag makes
-   * JwtStrategy re-read this row on the very next request.
+   * Target user is scoped to the caller's workspace in the same query, and the
+   * change is flagged in RoleInvalidationStore so the next request picks it up
+   * before the member's access token (whose claims still say the old role) expires.
    */
   async updateRole(
     workspaceId: string,
@@ -155,40 +121,16 @@ export class WorkspacesService {
     const updated = await this.prisma.user.update({
       where: { id: userId },
       data: { role },
-      select: {
-        id: true,
-        email: true,
-        role: true,
-        oauthProvider: true,
-        createdAt: true,
-      },
+      select: { id: true, email: true, role: true, oauthProvider: true, createdAt: true },
     });
 
-    await this.roleInvalidations.invalidate(
-      userId,
-      this.accessTokenTtlSeconds(),
-    );
+    await this.roleInvalidations.invalidate(userId, this.accessTokenTtlSeconds());
     return updated;
   }
 
-  /** The access token TTL, parsed from JWT_EXPIRES_IN, defaulting to 15m. */
   private accessTokenTtlSeconds(): number {
-    const unitSeconds: Record<string, number> = {
-      s: 1,
-      m: 60,
-      h: 3600,
-      d: 86400,
-    };
     const raw = (this.config.get<string>('JWT_EXPIRES_IN') ?? '15m').trim();
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric)) {
-      return Math.max(1, Math.floor(numeric));
-    }
-    const value = Number(raw.slice(0, -1));
-    const unit = raw[raw.length - 1];
-    if (Number.isNaN(value)) {
-      return 15 * 60;
-    }
-    return Math.max(1, Math.floor(value * (unitSeconds[unit] ?? 60)));
+    const seconds = parseDurationToSeconds(raw);
+    return Number.isFinite(seconds) ? Math.max(1, Math.floor(seconds)) : 15 * 60;
   }
 }

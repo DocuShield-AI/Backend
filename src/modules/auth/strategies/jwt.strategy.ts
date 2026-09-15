@@ -21,15 +21,10 @@ export function fromCookieOrBearer(req: Request): string | null {
 }
 
 /**
- * Verifies the Bearer access token and shapes `req.user`.
- *
- * The happy path trusts the claims as-is instead of re-reading the user on
- * every request — that keeps the hot path off the Postgres pool. The blind
- * spot of trusting a token's claims is that a role change stays hidden until
- * the token expires (15m). The RoleInvalidationStore closes that window: the
- * moment a role changes, the user is flagged in Redis and every following
- * request drops back to a single, tiny DB read to fetch the fresh role. Only
- * flagged users pay that read; everyone else keeps the fast path.
+ * Verifies the Bearer access token and shapes `req.user`. Claims are trusted
+ * as-is to keep the hot path off Postgres; the blind spot (a role change stays
+ * hidden until token expiry) is closed by RoleInvalidationStore, which flags
+ * the user in Redis so only flagged requests pay one tiny DB read.
  */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
