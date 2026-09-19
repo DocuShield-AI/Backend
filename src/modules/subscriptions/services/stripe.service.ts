@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -12,7 +12,8 @@ export interface CheckoutResult {
 
 @Injectable()
 export class StripeService {
-  private readonly stripe: Stripe;
+  private readonly logger = new Logger(StripeService.name);
+  private readonly stripe: Stripe | null;
   private readonly webhookSecret: string;
 
   constructor(
@@ -20,9 +21,23 @@ export class StripeService {
     private readonly prisma: PrismaService,
     private readonly n8n: N8nWebhookClient,
   ) {
-    const key = this.config.getOrThrow<string>('STRIPE_SECRET_KEY');
-    this.webhookSecret = this.config.getOrThrow<string>('STRIPE_WEBHOOK_SECRET');
-    this.stripe = new Stripe(key, { apiVersion: '2026-08-26.dahlia' });
+    const key = this.config.get<string>('STRIPE_SECRET_KEY');
+    this.webhookSecret = this.config.get<string>('STRIPE_WEBHOOK_SECRET') ?? '';
+    if (!key) {
+      this.logger.warn(
+        'STRIPE_SECRET_KEY not set — billing routes will answer 503 until configured',
+      );
+      this.stripe = null;
+    } else {
+      this.stripe = new Stripe(key, { apiVersion: '2026-08-26.dahlia' });
+    }
+  }
+
+  private requireStripe(): Stripe {
+    if (!this.stripe) {
+      throw new ServiceUnavailableException('Stripe is not configured');
+    }
+    return this.stripe;
   }
 
   private priceIdForPlan(plan: CreateCheckoutDto['plan']): string {
@@ -36,7 +51,7 @@ export class StripeService {
     // Idempotency key = workspace + plan. A double-click on the pay button
     // (or a frontend retry) reuses the same key, so Stripe returns the same
     // session instead of creating a second chargeable one.
-    const session = await this.stripe.checkout.sessions.create(
+    const session = await this.requireStripe().checkout.sessions.create(
       {
         mode: 'subscription',
         customer_email: undefined,
@@ -71,7 +86,7 @@ export class StripeService {
     if (!signature) {
       throw new Error('Missing Stripe signature header');
     }
-    return this.stripe.webhooks.constructEvent(
+    return this.requireStripe().webhooks.constructEvent(
       payload,
       signature,
       this.webhookSecret,
@@ -113,7 +128,7 @@ export class StripeService {
         ? session.subscription
         : session.subscription.id;
 
-    const subscription = await this.stripe.subscriptions.retrieve(subscriptionId);
+    const subscription = await this.requireStripe().subscriptions.retrieve(subscriptionId);
     const currentPeriodEnd = this.periodEndOf(subscription);
 
     await this.prisma.subscription.upsert({

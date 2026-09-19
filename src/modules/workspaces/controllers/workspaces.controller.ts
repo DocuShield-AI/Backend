@@ -49,7 +49,8 @@ export class WorkspacesController {
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<InviteResult> {
     return this.workspaces.createInvite(user.workspaceId, user.userId, {
-      // Least-privilege default: no role supplied means a read-only viewer.
+      email: dto.email,
+      inviterEmail: user.email,
       role: dto.role ?? Role.viewer,
       expiresInDays: dto.expiresInDays ?? 7,
     });

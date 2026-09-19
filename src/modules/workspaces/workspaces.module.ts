@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AuthModule } from '../auth/auth.module';
 import { WorkspacesController } from './controllers/workspaces.controller';
 import { WorkspacesService } from './services/workspaces.service';
 
@@ -8,6 +9,7 @@ import { WorkspacesService } from './services/workspaces.service';
  * filter; this module covers the workspace's own data and membership.
  */
 @Module({
+  imports: [AuthModule],
   controllers: [WorkspacesController],
   providers: [WorkspacesService],
   exports: [WorkspacesService],

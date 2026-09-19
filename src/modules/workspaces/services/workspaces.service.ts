@@ -2,12 +2,15 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'crypto';
 import { Plan, Role } from '@prisma/client';
+import { EmailService } from '../../notifications/email.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RoleInvalidationStore } from '../../auth/services/role-invalidation.store';
 
 export interface InviteInput {
+  email: string;
   role: Role;
   expiresInDays: number;
+  inviterEmail?: string;
 }
 
 export interface InviteResult {
@@ -39,6 +42,7 @@ export class WorkspacesService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly roleInvalidations: RoleInvalidationStore,
+    private readonly email: EmailService,
   ) {}
 
   /**
@@ -104,7 +108,7 @@ export class WorkspacesService {
   ): Promise<InviteResult> {
     const workspace = await this.prisma.workspace.findUnique({
       where: { id: workspaceId },
-      select: { id: true },
+      select: { id: true, name: true },
     });
     if (!workspace) {
       throw new NotFoundException('Workspace not found');
@@ -119,6 +123,15 @@ export class WorkspacesService {
 
     const invitation = await this.prisma.invitation.create({
       data: { workspaceId, code, role: input.role, createdByUserId, expiresAt },
+    });
+
+    await this.email.sendWorkspaceInvite({
+      to: input.email.toLowerCase(),
+      workspaceName: workspace.name,
+      inviteCode: invitation.code,
+      role: invitation.role,
+      expiresAt: invitation.expiresAt,
+      inviterEmail: input.inviterEmail,
     });
 
     return {

@@ -99,6 +99,15 @@ describe('AuthService', () => {
   let password: PasswordService;
   let redis: ReturnType<typeof makeFakeRedis>;
   let store: RefreshTokenStore;
+  let signupVerifications: {
+    save: jest.Mock;
+    get: jest.Mock;
+    delete: jest.Mock;
+  };
+  let email: {
+    sendPasswordResetCode: jest.Mock;
+    sendSignupVerificationCode: jest.Mock;
+  };
 
   const jwt = new JwtService({
     secret: ACCESS_SECRET,
@@ -131,8 +140,18 @@ describe('AuthService', () => {
     store = new RefreshTokenStore({
       Client: redis.client,
     } as unknown as RedisCacheService);
+    signupVerifications = {
+      save: jest.fn().mockResolvedValue(undefined),
+      get: jest.fn().mockResolvedValue(null),
+      delete: jest.fn().mockResolvedValue(undefined),
+    };
+    email = {
+      sendPasswordResetCode: jest.fn().mockResolvedValue(undefined),
+      sendSignupVerificationCode: jest.fn().mockResolvedValue(undefined),
+    };
     prisma = {
-      user: { findUnique: jest.fn() },
+      user: { findUnique: jest.fn().mockResolvedValue(null) },
+      invitation: { findUnique: jest.fn() },
       $transaction: jest.fn(),
     };
     service = new AuthService(
@@ -145,57 +164,44 @@ describe('AuthService', () => {
         invalidate: jest.fn().mockResolvedValue(undefined),
         clear: jest.fn().mockResolvedValue(undefined),
       } as unknown as RoleInvalidationStore,
+      {
+        save: jest.fn().mockResolvedValue(undefined),
+        get: jest.fn().mockResolvedValue(null),
+        delete: jest.fn().mockResolvedValue(undefined),
+      } as unknown as import('./password-reset.store').PasswordResetStore,
+      signupVerifications as unknown as import('./signup-verification.store').SignupVerificationStore,
+      email as unknown as import('../../notifications/email.service').EmailService,
     );
   });
 
   describe('signup', () => {
-    it('creates the workspace and its first user as an admin, in one transaction', async () => {
-      const workspaceCreate = jest.fn().mockResolvedValue({ id: 'ws_1' });
-      const userCreate = jest.fn().mockResolvedValue(makeUser());
-      prisma.$transaction.mockImplementation((cb: any) =>
-        cb({ workspace: { create: workspaceCreate }, user: { create: userCreate } }),
-      );
-
+    it('stores a pending signup and sends a verification email', async () => {
       const result = await service.signup({
         email: 'Legal@Acme.com',
         password: 'a-good-password',
         workspaceName: 'Acme Legal',
       });
 
-      expect(workspaceCreate).toHaveBeenCalledWith({ data: { name: 'Acme Legal' } });
-      expect(userCreate).toHaveBeenCalledWith(
+      expect(signupVerifications.save).toHaveBeenCalledWith(
+        'legal@acme.com',
         expect.objectContaining({
-          data: expect.objectContaining({
-            workspaceId: 'ws_1',
-            // Email is normalised, so Legal@Acme.com and legal@acme.com are one account.
-            email: 'legal@acme.com',
-            role: Role.admin,
-          }),
+          type: 'create',
+          workspaceName: 'Acme Legal',
         }),
       );
-
-      // The password must never be stored in the clear.
-      const stored = userCreate.mock.calls[0][0].data.passwordHash;
-      expect(stored).not.toBe('a-good-password');
-      await expect(password.compare('a-good-password', stored)).resolves.toBe(true);
-
-      expect(result.user).toEqual({
-        id: 'u_1',
+      expect(email.sendSignupVerificationCode).toHaveBeenCalledWith(
+        'legal@acme.com',
+        expect.stringMatching(/^\d{8}$/),
+      );
+      expect(result).toEqual({
+        message: expect.any(String),
         email: 'legal@acme.com',
-        role: Role.admin,
-        workspaceId: 'ws_1',
+        requiresVerification: true,
       });
-      expect(result.accessToken).toEqual(expect.any(String));
-      expect(result.refreshToken).toEqual(expect.any(String));
     });
 
-    it('turns a duplicate-email unique violation into a 409, not a 500', async () => {
-      prisma.$transaction.mockRejectedValue(
-        new Prisma.PrismaClientKnownRequestError('dup', {
-          code: 'P2002',
-          clientVersion: 'test',
-        }),
-      );
+    it('rejects an email that is already registered', async () => {
+      prisma.user.findUnique.mockResolvedValue(makeUser());
 
       await expect(
         service.signup({
@@ -204,6 +210,48 @@ describe('AuthService', () => {
           workspaceName: 'Acme',
         }),
       ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('verifySignup', () => {
+    it('creates the workspace and its first user as an admin, in one transaction', async () => {
+      const code = '12345678';
+      const codeHash = await password.hash(code);
+      const passwordHash = await password.hash('a-good-password');
+      signupVerifications.get.mockResolvedValue({
+        codeHash,
+        passwordHash,
+        type: 'create',
+        workspaceName: 'Acme Legal',
+      });
+
+      const workspaceCreate = jest.fn().mockResolvedValue({ id: 'ws_1' });
+      const userCreate = jest.fn().mockResolvedValue(makeUser());
+      prisma.$transaction.mockImplementation((cb: any) =>
+        cb({ workspace: { create: workspaceCreate }, user: { create: userCreate } }),
+      );
+
+      const result = await service.verifySignup('Legal@Acme.com', code);
+
+      expect(workspaceCreate).toHaveBeenCalledWith({ data: { name: 'Acme Legal' } });
+      expect(userCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            workspaceId: 'ws_1',
+            email: 'legal@acme.com',
+            role: Role.admin,
+          }),
+        }),
+      );
+      expect(signupVerifications.delete).toHaveBeenCalledWith('legal@acme.com');
+      expect(result.user).toEqual({
+        id: 'u_1',
+        email: 'legal@acme.com',
+        role: Role.admin,
+        workspaceId: 'ws_1',
+      });
+      expect(result.accessToken).toEqual(expect.any(String));
+      expect(result.refreshToken).toEqual(expect.any(String));
     });
   });
 
@@ -243,8 +291,8 @@ describe('AuthService', () => {
       return { invitationFindUnique, invitationUpdateMany, userCreate, invitationUpdate };
     };
 
-    it('joins the invite workspace with the invite role, marking the code used', async () => {
-      const { userCreate, invitationUpdate } = makeJoinTx();
+    it('stores a pending join signup after validating the invite code', async () => {
+      prisma.invitation.findUnique.mockResolvedValue(invite);
 
       const result = await service.signup({
         email: 'Teammate@Acme.com',
@@ -252,6 +300,31 @@ describe('AuthService', () => {
         type: 'join',
         inviteCode: 'ABC123',
       });
+
+      expect(signupVerifications.save).toHaveBeenCalledWith(
+        'teammate@acme.com',
+        expect.objectContaining({
+          type: 'join',
+          inviteCode: 'ABC123',
+        }),
+      );
+      expect(result.requiresVerification).toBe(true);
+    });
+
+    it('joins the invite workspace with the invite role, marking the code used', async () => {
+      const code = '87654321';
+      const codeHash = await password.hash(code);
+      const passwordHash = await password.hash('a-good-password');
+      signupVerifications.get.mockResolvedValue({
+        codeHash,
+        passwordHash,
+        type: 'join',
+        inviteCode: 'ABC123',
+      });
+
+      const { userCreate, invitationUpdate } = makeJoinTx();
+
+      const result = await service.verifySignup('Teammate@Acme.com', code);
 
       expect(userCreate).toHaveBeenCalledWith({
         data: expect.objectContaining({
@@ -271,10 +344,6 @@ describe('AuthService', () => {
     });
 
     it('rejects when no invite code is supplied', async () => {
-      prisma.$transaction.mockImplementation(() => {
-        throw new Error('tx should not run');
-      });
-
       await expect(
         service.signup({
           email: 'x@acme.com',
@@ -285,13 +354,7 @@ describe('AuthService', () => {
     });
 
     it('rejects an unknown invite code', async () => {
-      makeJoinTx();
-      prisma.$transaction.mockImplementation((cb: any) =>
-        cb({
-          invitation: { findUnique: jest.fn().mockResolvedValue(null) },
-          user: { create: jest.fn() },
-        }),
-      );
+      prisma.invitation.findUnique.mockResolvedValue(null);
 
       await expect(
         service.signup({
@@ -304,7 +367,8 @@ describe('AuthService', () => {
     });
 
     it('rejects an expired invite', async () => {
-      makeJoinTx({
+      prisma.invitation.findUnique.mockResolvedValue({
+        ...invite,
         expiresAt: new Date(Date.now() - 1000),
       });
 
@@ -319,18 +383,22 @@ describe('AuthService', () => {
     });
 
     it('rejects an already-used invite (claim returns 0 rows)', async () => {
+      const code = '87654321';
+      const codeHash = await password.hash(code);
+      const passwordHash = await password.hash('a-good-password');
+      signupVerifications.get.mockResolvedValue({
+        codeHash,
+        passwordHash,
+        type: 'join',
+        inviteCode: 'ABC123',
+      });
+
       const { invitationUpdateMany } = makeJoinTx();
       invitationUpdateMany.mockResolvedValue({ count: 0 });
 
       await expect(
-        service.signup({
-          email: 'x@acme.com',
-          password: 'a-good-password',
-          type: 'join',
-          inviteCode: 'ABC123',
-        }),
+        service.verifySignup('x@acme.com', code),
       ).rejects.toThrow(BadRequestException);
-      // No user should have been created when the claim lost the race.
       expect(prisma.$transaction).toHaveBeenCalled();
     });
   });

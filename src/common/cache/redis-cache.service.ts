@@ -15,9 +15,12 @@ export class RedisCacheService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly config: ConfigService) {}
 
   async onModuleInit(): Promise<void> {
-    this.client = new Redis(this.config.getOrThrow<string>('REDIS_URL'), {
+    const url = this.config.getOrThrow<string>('REDIS_URL');
+    this.client = new Redis(url, {
       lazyConnect: true,
       maxRetriesPerRequest: 3,
+      // Upstash and other hosted Redis providers use TLS (rediss://).
+      ...(url.startsWith('rediss://') ? { tls: {} } : {}),
     });
     await this.client.connect().catch((err: Error) => {
       this.logger.error(`Redis connection failed: ${err.message}`);

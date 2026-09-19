@@ -1,7 +1,11 @@
-import { IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsEmail, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
 import { Role } from '@prisma/client';
 
 export class CreateInviteDto {
+  /** Email address to send the workspace invitation to. */
+  @IsEmail()
+  email: string;
+
   /**
    * The role the invited person is given on join. Defaults to viewer when
    * omitted, keeping the least-privilege default.

@@ -6,6 +6,8 @@ import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './controllers/auth.controller';
 import { AuthService } from './services/auth.service';
 import { PasswordService } from './services/password.service';
+import { PasswordResetStore } from './services/password-reset.store';
+import { SignupVerificationStore } from './services/signup-verification.store';
 import { RefreshTokenStore } from './services/refresh-token.store';
 import { RoleInvalidationStore } from './services/role-invalidation.store';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -42,6 +44,8 @@ import { RolesGuard } from './guards/roles.guard';
     AuthService,
     PasswordService,
     JwtStrategy,
+    PasswordResetStore,
+    SignupVerificationStore,
     RefreshTokenStore,
     RoleInvalidationStore,
     // Order matters: authentication must populate req.user before the role
@@ -69,6 +73,6 @@ import { RolesGuard } from './guards/roles.guard';
   ],
   // PassportModule is re-exported so Phase 3's JwtAuthGuard can extend
   // AuthGuard('jwt') from anywhere without re-registering the strategy.
-  exports: [AuthService, PassportModule],
+  exports: [AuthService, PassportModule, RoleInvalidationStore],
 })
 export class AuthModule {}

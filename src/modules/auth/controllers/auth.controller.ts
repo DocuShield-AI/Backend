@@ -20,9 +20,14 @@ import type {
   TokenPair,
 } from '../auth.types';
 import { AuthService, AuthResult } from '../services/auth.service';
+import { ForgotPasswordDto } from '../dto/forgot-password.dto';
 import { LoginDto } from '../dto/login.dto';
 import { RefreshDto } from '../dto/refresh.dto';
+import { ResetPasswordDto } from '../dto/reset-password.dto';
 import { SignupDto } from '../dto/signup.dto';
+import { ResendSignupCodeDto } from '../dto/resend-signup-code.dto';
+import { VerifyResetCodeDto } from '../dto/verify-reset-code.dto';
+import { VerifySignupDto } from '../dto/verify-signup.dto';
 
 /**
  * Public auth surface. @Public() sits on each route because every one here
@@ -38,13 +43,14 @@ export class AuthController {
     private readonly config: ConfigService,
   ) {}
 
-  private sessionCookieOptions(maxAge: number): CookieOptions {
+  /** Express `maxAge` is milliseconds; JWT env values are parsed as seconds. */
+  private sessionCookieOptions(maxAgeSeconds: number): CookieOptions {
     return {
       httpOnly: true,
       sameSite: 'lax',
       secure: this.config.get<string>('NODE_ENV') === 'production',
       path: '/',
-      maxAge,
+      maxAge: maxAgeSeconds * 1000,
     };
   }
 
@@ -102,13 +108,32 @@ export class AuthController {
 
   @Public()
   @Post('signup')
+  @HttpCode(200)
   async signup(
     @Body() dto: SignupDto,
+  ): Promise<{ message: string; email: string; requiresVerification: true }> {
+    return this.authService.signup(dto);
+  }
+
+  @Public()
+  @Post('verify-signup')
+  @HttpCode(200)
+  async verifySignup(
+    @Body() dto: VerifySignupDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ user: AuthResult['user'] }> {
-    const result = await this.authService.signup(dto);
+    const result = await this.authService.verifySignup(dto.email, dto.code);
     this.setSessionCookies(res, result);
     return { user: result.user };
+  }
+
+  @Public()
+  @Post('resend-signup-code')
+  @HttpCode(200)
+  async resendSignupCode(
+    @Body() dto: ResendSignupCodeDto,
+  ): Promise<{ message: string }> {
+    return this.authService.resendSignupCode(dto.email);
   }
 
   // 200 rather than the default 201: logging in does not create a resource.
@@ -155,6 +180,33 @@ export class AuthController {
       dto.refreshToken ?? req.cookies?.[REFRESH_TOKEN_COOKIE] ?? '';
     await this.authService.logout(presented);
     this.clearSessionCookies(res);
+  }
+
+  @Public()
+  @Post('forgot-password')
+  @HttpCode(200)
+  async forgotPassword(
+    @Body() dto: ForgotPasswordDto,
+  ): Promise<{ message: string }> {
+    return this.authService.requestPasswordReset(dto.email);
+  }
+
+  @Public()
+  @Post('verify-reset-code')
+  @HttpCode(200)
+  async verifyResetCode(
+    @Body() dto: VerifyResetCodeDto,
+  ): Promise<{ valid: true }> {
+    return this.authService.verifyResetCode(dto.email, dto.code);
+  }
+
+  @Public()
+  @Post('reset-password')
+  @HttpCode(200)
+  async resetPassword(
+    @Body() dto: ResetPasswordDto,
+  ): Promise<{ message: string }> {
+    return this.authService.resetPassword(dto.email, dto.code, dto.password);
   }
 
   /**

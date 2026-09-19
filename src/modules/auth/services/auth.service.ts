@@ -8,10 +8,13 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService, type JwtSignOptions } from '@nestjs/jwt';
 import { Prisma, Role, User } from '@prisma/client';
-import { randomUUID } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
+import { EmailService } from '../../notifications/email.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PasswordService } from './password.service';
+import { PasswordResetStore } from './password-reset.store';
 import { RefreshTokenStore } from './refresh-token.store';
+import { SignupVerificationStore } from './signup-verification.store';
 import { RoleInvalidationStore } from './role-invalidation.store';
 import {
   JwtPayload,
@@ -26,6 +29,15 @@ export interface AuthResult extends TokenPair {
   user: { id: string; email: string; role: Role; workspaceId: string };
 }
 
+export const PASSWORD_RESET_SENT_MESSAGE =
+  'If an account exists for this email, a reset code has been sent.';
+
+export const SIGNUP_VERIFICATION_SENT_MESSAGE =
+  'A verification code has been sent to your email.';
+
+export const SIGNUP_CODE_RESENT_MESSAGE =
+  'If a pending signup exists for this email, a new verification code has been sent.';
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -37,36 +49,107 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly refreshTokens: RefreshTokenStore,
     private readonly roleInvalidations: RoleInvalidationStore,
+    private readonly passwordResets: PasswordResetStore,
+    private readonly signupVerifications: SignupVerificationStore,
+    private readonly email: EmailService,
   ) {}
 
   /**
-   * Creates a workspace and its first user together, in one transaction. They
-   * are inseparable: `User.workspaceId` is a non-null foreign key, so a user
-   * without a workspace cannot exist, and a half-applied signup would leave an
-   * orphan workspace behind.
+   * Starts signup by emailing an 8-digit verification code. The account is
+   * created only after the code is confirmed — see verifySignup().
    */
-  async signup(dto: SignupDto): Promise<AuthResult> {
-    // `type` defaults to create for backwards compatibility — a client that
-    // omits it gets a brand-new workspace exactly as before.
-    return dto.type === 'join'
-      ? this.joinWorkspaceWithInvite({
-          code: dto.inviteCode,
-          email: dto.email,
-          passwordHash: await this.password.hash(dto.password),
-        })
-      : this.createWorkspaceSignup(dto);
+  async signup(
+    dto: SignupDto,
+  ): Promise<{ message: string; email: string; requiresVerification: true }> {
+    const normalized = dto.email.toLowerCase();
+    const type = dto.type ?? 'create';
+
+    const existing = await this.prisma.user.findUnique({ where: { email: normalized } });
+    if (existing) {
+      throw new ConflictException('An account with this email already exists');
+    }
+
+    if (type === 'join') {
+      await this.assertJoinInviteValid(dto.inviteCode);
+    } else if (!dto.workspaceName) {
+      throw new BadRequestException(
+        'A workspace name is required to create a company',
+      );
+    }
+
+    const code = String(randomInt(10_000_000, 99_999_999));
+    const [codeHash, passwordHash] = await Promise.all([
+      this.password.hash(code),
+      this.password.hash(dto.password),
+    ]);
+
+    await this.signupVerifications.save(normalized, {
+      codeHash,
+      passwordHash,
+      type,
+      workspaceName: dto.workspaceName,
+      inviteCode: dto.inviteCode?.trim().toUpperCase(),
+    });
+
+    await this.email.sendSignupVerificationCode(normalized, code);
+
+    return {
+      message: SIGNUP_VERIFICATION_SENT_MESSAGE,
+      email: normalized,
+      requiresVerification: true,
+    };
   }
 
-  private async createWorkspaceSignup(dto: SignupDto): Promise<AuthResult> {
-    // Guarded by DTO validation; a direct service call still cannot write an
-    // empty workspace name into the database.
+  /** Completes signup after the email verification code is confirmed. */
+  async verifySignup(email: string, code: string): Promise<AuthResult> {
+    const normalized = email.toLowerCase();
+    const record = await this.assertValidSignupCode(normalized, code);
+    await this.signupVerifications.delete(normalized);
+
+    if (record.type === 'join') {
+      return this.joinWorkspaceWithInvite({
+        code: record.inviteCode,
+        email: normalized,
+        passwordHash: record.passwordHash,
+      });
+    }
+
+    return this.createWorkspaceSignup({
+      email: normalized,
+      password: '',
+      workspaceName: record.workspaceName,
+      passwordHash: record.passwordHash,
+    });
+  }
+
+  async resendSignupCode(email: string): Promise<{ message: string }> {
+    const normalized = email.toLowerCase();
+    const pending = await this.signupVerifications.get(normalized);
+
+    if (pending) {
+      const code = String(randomInt(10_000_000, 99_999_999));
+      const codeHash = await this.password.hash(code);
+      await this.signupVerifications.save(normalized, {
+        ...pending,
+        codeHash,
+      });
+      await this.email.sendSignupVerificationCode(normalized, code);
+    }
+
+    return { message: SIGNUP_CODE_RESENT_MESSAGE };
+  }
+
+  private async createWorkspaceSignup(
+    dto: SignupDto & { passwordHash?: string },
+  ): Promise<AuthResult> {
     if (!dto.workspaceName) {
       throw new BadRequestException(
         'A workspace name is required to create a company',
       );
     }
     const workspaceName: string = dto.workspaceName;
-    const passwordHash = await this.password.hash(dto.password);
+    const passwordHash =
+      dto.passwordHash ?? (await this.password.hash(dto.password));
 
     let user: User;
     try {
@@ -298,6 +381,105 @@ export class AuthService {
       `OAuth signup: user ${user.id} created workspace ${user.workspaceId} via ${profile.provider}`,
     );
     return this.buildResult(user);
+  }
+
+  /**
+   * Sends an 8-digit reset code. Always returns the same message so callers
+   * cannot tell whether the email is registered.
+   */
+  async requestPasswordReset(email: string): Promise<{ message: string }> {
+    const normalized = email.toLowerCase();
+    const user = await this.prisma.user.findUnique({ where: { email: normalized } });
+
+    if (user) {
+      const code = String(randomInt(10_000_000, 99_999_999));
+      const codeHash = await this.password.hash(code);
+      await this.passwordResets.save(normalized, {
+        userId: user.id,
+        codeHash,
+      });
+
+      await this.email.sendPasswordResetCode(normalized, code);
+    }
+
+    return { message: PASSWORD_RESET_SENT_MESSAGE };
+  }
+
+  /** Checks a reset code without consuming it (matches frontend two-step UI). */
+  async verifyResetCode(email: string, code: string): Promise<{ valid: true }> {
+    await this.assertValidResetCode(email, code);
+    return { valid: true };
+  }
+
+  /** Verifies the code, updates the password, and revokes all sessions. */
+  async resetPassword(
+    email: string,
+    code: string,
+    newPassword: string,
+  ): Promise<{ message: string }> {
+    const normalized = email.toLowerCase();
+    const record = await this.assertValidResetCode(normalized, code);
+
+    const passwordHash = await this.password.hash(newPassword);
+    await this.prisma.user.update({
+      where: { id: record.userId },
+      data: { passwordHash },
+    });
+
+    await this.passwordResets.delete(normalized);
+    await this.refreshTokens.revokeAll(record.userId);
+
+    this.logger.log(`Password reset completed for user ${record.userId}`);
+    return { message: 'Password updated successfully' };
+  }
+
+  private async assertJoinInviteValid(code?: string): Promise<void> {
+    const normalized = code?.trim().toUpperCase();
+    if (!normalized) {
+      throw new BadRequestException('An invite code is required to join a company');
+    }
+
+    const invite = await this.prisma.invitation.findUnique({
+      where: { code: normalized },
+    });
+    if (!invite) {
+      throw new BadRequestException('Invalid invite code');
+    }
+    if (invite.expiresAt < new Date()) {
+      throw new BadRequestException('Invite code has expired');
+    }
+    if (invite.usedAt) {
+      throw new BadRequestException('Invite code has already been used');
+    }
+  }
+
+  private async assertValidSignupCode(email: string, code: string) {
+    const record = await this.signupVerifications.get(email);
+    if (!record) {
+      throw new BadRequestException('Invalid or expired code');
+    }
+
+    const ok = await this.password.compare(code, record.codeHash);
+    if (!ok) {
+      throw new BadRequestException('Invalid or expired code');
+    }
+
+    return record;
+  }
+
+  private async assertValidResetCode(email: string, code: string) {
+    const normalized = email.toLowerCase();
+    const record = await this.passwordResets.get(normalized);
+    if (!record) {
+      throw new BadRequestException('Invalid or expired code');
+    }
+
+    const ok = await this.password.compare(code, record.codeHash);
+    if (!ok) {
+      throw new BadRequestException('Invalid or expired code');
+    }
+
+    return record;
   }
 
   /** Ends one session. Other devices keep working. */
