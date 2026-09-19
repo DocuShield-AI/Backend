@@ -1,5 +1,5 @@
 import { Global, Module } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { APP_GUARD } from '@nestjs/core';
@@ -13,6 +13,7 @@ import { WorkspaceThrottlerGuard } from './workspace-throttler.guard';
 @Module({
   imports: [
     ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         storage: new ThrottlerStorageRedisService(
