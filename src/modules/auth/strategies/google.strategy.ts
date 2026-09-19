@@ -5,8 +5,8 @@ import { Profile, Strategy } from 'passport-google-oauth20';
 import { OAuthProfile } from '../auth.types';
 
 /**
- * Google sign-in (Part 1.6). Constructed only when credentials are present —
- * see AuthModule's factory — because passport-google-oauth20 throws on an empty
+ * Google sign-in. Constructed only when credentials are present — see
+ * AuthModule's factory — because passport-google-oauth20 throws on an empty
  * clientID and would take the whole app down with it.
  */
 @Injectable()

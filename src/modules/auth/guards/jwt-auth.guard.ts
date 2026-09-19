@@ -5,12 +5,9 @@ import { Observable } from 'rxjs';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 /**
- * Global authentication gate (Part 1.6).
- *
- * Registered as an APP_GUARD so every route is protected by default; only
- * routes carrying @Public() are let through unauthenticated. Doing it this way
- * round means a new endpoint is closed until someone deliberately opens it,
- * rather than open until someone remembers to close it.
+ * Global authentication gate. Registered as an APP_GUARD so every route is
+ * protected by default; only routes carrying @Public() are let through. A new
+ * endpoint stays closed until someone deliberately opens it.
  */
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {

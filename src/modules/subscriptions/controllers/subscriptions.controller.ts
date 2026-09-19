@@ -15,9 +15,6 @@ export class SubscriptionsController {
     @Body() dto: CreateCheckoutDto,
     @CurrentUser('workspaceId') workspaceId: string,
   ): Promise<{ url: string; sessionId: string }> {
-    // The workspace is taken from the token, never from the body — otherwise
-    // any authenticated user could start a checkout against someone else's
-    // workspace. The DTO still declares the field; it is simply overridden.
     return this.stripeService.createCheckoutSession({ ...dto, workspaceId });
   }
 }

@@ -1,11 +1,7 @@
-import { IsString, IsNotEmpty } from 'class-validator';
+import { IsIn, IsString } from 'class-validator';
 
 export class CreateCheckoutDto {
   @IsString()
-  @IsNotEmpty()
-  workspaceId: string;
-
-  @IsString()
-  @IsNotEmpty()
+  @IsIn(['pro', 'enterprise'])
   plan: 'pro' | 'enterprise';
 }

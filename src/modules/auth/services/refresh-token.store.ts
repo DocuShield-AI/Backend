@@ -3,27 +3,11 @@ import type Redis from 'ioredis';
 import { RedisCacheService } from '../../../common/cache/redis-cache.service';
 
 /**
- * Server-side record of which refresh tokens are still live.
- *
- * A refresh JWT is only half the story: its signature proves it was issued, not
- * that it is still allowed. Holding the set of valid token ids per user is what
- * turns "rotation" from cosmetic (a new token each time, old one still works)
- * into real (old one dies the moment it is used).
- *
- * Two sets are kept per user, because "not live" has two very different causes:
- *
- *   live  — usable right now.
- *   spent — retired by a rotation. A client that follows the protocol has
- *           already thrown this away, so seeing it again means a copy exists.
- *
- * A token that is in neither set (logged out, expired, never issued) is simply
- * rejected. Without that distinction a single stale browser tab replaying an
- * old token after logout would look identical to theft and would sign the user
- * out of every device.
- *
- * Redis rather than a Postgres column, because that would mean a migration on
- * the shared schema, and because these records are inherently short-lived —
- * they expire on their own with the token's TTL.
+ * Server-side record of which refresh tokens are still live. Two sets per user,
+ * because "not live" has two very different causes: `live` is usable right now;
+ * `spent` was retired by a rotation — seeing it again means a copy leaked.
+ * A token in neither set (logged out, expired) is just rejected, so a stale tab
+ * cannot look like theft and nuke every device.
  */
 @Injectable()
 export class RefreshTokenStore {
@@ -43,7 +27,7 @@ export class RefreshTokenStore {
   async remember(userId: string, jti: string, ttlSeconds: number): Promise<void> {
     await this.run(async (client) => {
       await client.sadd(this.liveKey(userId), jti);
-      // Pushed forward on every issue, so the set outlives its newest member.
+      // Redis TTL is pushed forward on every issue so the set outlives its newest member.
       await client.expire(this.liveKey(userId), ttlSeconds);
     });
   }
@@ -76,12 +60,8 @@ export class RefreshTokenStore {
     );
   }
 
-  /**
-   * Drops every session for a user. Used when a spent token is replayed: the
-   * legitimate client no longer holds it, so its reappearance means a copy
-   * leaked, and the safe response is to end every session rather than guess
-   * which one is the attacker.
-   */
+  // Replaying a spent token means a copy leaked; end every session rather than
+  // guess which one belongs to the attacker.
   async revokeAll(userId: string): Promise<void> {
     await this.run(async (client) => {
       await client.del(this.liveKey(userId));

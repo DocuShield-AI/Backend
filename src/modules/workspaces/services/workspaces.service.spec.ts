@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Plan, Role } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EmailService } from '../../notifications/email.service';
 import { RoleInvalidationStore } from '../../auth/services/role-invalidation.store';
 import { WorkspacesService } from './workspaces.service';
 
@@ -22,6 +23,10 @@ describe('WorkspacesService', () => {
     invalidate: jest.fn().mockResolvedValue(undefined),
   } as unknown as RoleInvalidationStore;
 
+  const email = {
+    sendWorkspaceInvite: jest.fn().mockResolvedValue(undefined),
+  } as unknown as EmailService;
+
   beforeEach(() => {
     jest.clearAllMocks();
     prisma = {
@@ -36,12 +41,13 @@ describe('WorkspacesService', () => {
       prisma as PrismaService,
       config,
       roleInvalidations,
+      email,
     );
   });
 
   describe('createInvite', () => {
     it('creates a single-use code with the requested role and expiry', async () => {
-      prisma.workspace.findUnique.mockResolvedValue({ id: 'ws_1' });
+      prisma.workspace.findUnique.mockResolvedValue({ id: 'ws_1', name: 'Acme Legal' });
       prisma.invitation = { create: jest.fn() };
 
       prisma.invitation.create.mockResolvedValue({
@@ -54,6 +60,7 @@ describe('WorkspacesService', () => {
       });
 
       const result = await service.createInvite('ws_1', 'u_admin', {
+        email: 'invitee@acme.com',
         role: Role.legal,
         expiresInDays: 7,
       });
@@ -76,6 +83,7 @@ describe('WorkspacesService', () => {
 
       await expect(
         service.createInvite('ws_missing', 'u_admin', {
+          email: 'invitee@acme.com',
           role: Role.viewer,
           expiresInDays: 7,
         }),
@@ -133,23 +141,6 @@ describe('WorkspacesService', () => {
 
       expect(members).toHaveLength(1);
       expect(prisma.user.findMany.mock.calls[0][0].where.workspaceId).toBe('ws_1');
-    });
-  });
-
-  describe('isMember', () => {
-    it('matches on user and workspace together, not either alone', async () => {
-      prisma.user.findFirst.mockResolvedValue({ id: 'u_1' });
-
-      await expect(service.isMember('u_1', 'ws_1')).resolves.toBe(true);
-      expect(prisma.user.findFirst.mock.calls[0][0].where).toEqual({
-        id: 'u_1',
-        workspaceId: 'ws_1',
-      });
-    });
-
-    it('is false for a user outside the workspace', async () => {
-      prisma.user.findFirst.mockResolvedValue(null);
-      await expect(service.isMember('u_1', 'ws_other')).resolves.toBe(false);
     });
   });
 

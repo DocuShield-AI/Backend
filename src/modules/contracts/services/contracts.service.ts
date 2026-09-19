@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { ContractStatus, Role } from '@prisma/client';
 import { IngestionProducer } from '../../queue/producers/ingestion.producer';
 import {
@@ -23,10 +23,6 @@ export class ContractsService {
     private readonly producer: IngestionProducer,
   ) {}
 
-  /**
-   * Creates a contract record after idempotent hash-dedupe, then enqueues the
-   * ingestion job for the AI microservice.
-   */
   async uploadContract(input: CreateContractInput) {
     const { workspaceId, uploadedByUserId, file } = input;
     const fileUrl = `s3://contracts/${workspaceId}/${file.fileName}`;
@@ -38,83 +34,49 @@ export class ContractsService {
       fileHash: file.fileHash,
       fileUrl,
     });
+    try {
+      const { jobId } = await this.producer.enqueue({ contractId: contract.id, workspaceId, fileUrl, fileHash: file.fileHash });
+      await this.repository.createIngestionJob({ contractId: contract.id, bullmqJobId: jobId });
+    } catch (err) {
+      await this.repository.remove(contract.id).catch(() => undefined);
+      this.logger.error(
+        `Contract ${contract.id} enqueue failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new InternalServerErrorException('Failed to queue contract for processing');
+    }
 
-    const { jobId } = await this.producer.enqueue({
-      contractId: contract.id,
-      workspaceId,
-      fileUrl,
-      fileHash: file.fileHash,
-    });
-
-    await this.repository.createIngestionJob({
-      contractId: contract.id,
-      bullmqJobId: jobId,
-    });
-
-    this.logger.log(
-      `Contract ${contract.id} queued for ingestion (job ${jobId})`,
-    );
+    this.logger.log(`Contract ${contract.id} queued for ingestion`);
     return contract;
   }
 
-  /**
-   * Returns true when the exact same file (by SHA-256) already exists in the
-   * workspace, enabling idempotent uploads without double-billing.
-   */
   async isDuplicate(workspaceId: string, fileHash: string): Promise<boolean> {
-    const existing = await this.repository.findByHash(workspaceId, fileHash);
-    return Boolean(existing);
+    return Boolean(await this.repository.findByHash(workspaceId, fileHash));
   }
 
-  /**
-   * Dashboard list. Admins and legal see the whole workspace; viewers are
-   * read-only by definition and are scoped to their own uploads — the filter
-   * lives in the query, so another viewer's rows never reach the service.
-   */
   listContracts(
     workspaceId: string,
     userId: string,
     role: Role,
+    cursor?: string,
+    limit = 20,
   ): Promise<ContractListItem[]> {
-    return this.repository.list(
-      workspaceId,
-      role === Role.viewer ? userId : undefined,
-    );
+    return this.repository.list(workspaceId, role === Role.viewer ? userId : undefined, cursor, limit);
   }
 
-  /**
-   * 404 rather than 403 for another workspace's contract: a "forbidden" reply
-   * would confirm the id exists, which is itself a leak across tenants.
-   */
-  async getContract(
-    contractId: string,
-    workspaceId: string,
-  ): Promise<ContractWithIngestion | null> {
-    const contract = await this.repository.findByIdWithIngestion(
-      contractId,
-      workspaceId,
-    );
+  // 404, not 403: avoids confirming the id exists in another tenant.
+  async getContract(contractId: string, workspaceId: string): Promise<ContractWithIngestion> {
+    const contract = await this.repository.findByIdWithIngestion(contractId, workspaceId);
     if (!contract) {
       throw new NotFoundException('Contract not found');
     }
     return contract;
   }
 
-  /**
-   * Job-status polling endpoint — tracks queued → extracting → embedding →
-   * classifying → ready.
-   */
   async getContractStatus(
     contractId: string,
     workspaceId: string,
   ): Promise<{ status: ContractStatus; stage: string | null }> {
     const contract = await this.getContract(contractId, workspaceId);
-    if (!contract) {
-      throw new NotFoundException('Contract not found');
-    }
-    return {
-      status: contract.status as ContractStatus,
-      stage: contract.ingestionJob?.stage ?? null,
-    };
+    return { status: contract.status as ContractStatus, stage: contract.ingestionJob?.stage ?? null };
   }
 }

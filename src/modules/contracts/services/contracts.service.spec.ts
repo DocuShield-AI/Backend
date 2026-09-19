@@ -99,7 +99,7 @@ describe('ContractsService — workspace scoping', () => {
       await service.listContracts('ws_1', 'u_1', Role.admin);
       await service.listContracts('ws_1', 'u_1', Role.legal);
 
-      expect(repository.list).toHaveBeenCalledWith('ws_1', undefined);
+      expect(repository.list).toHaveBeenCalledWith('ws_1', undefined, undefined, 20);
       expect(repository.list).toHaveBeenCalledTimes(2);
     });
 
@@ -108,7 +108,7 @@ describe('ContractsService — workspace scoping', () => {
 
       await service.listContracts('ws_1', 'u_1', Role.viewer);
 
-      expect(repository.list).toHaveBeenCalledWith('ws_1', 'u_1');
+      expect(repository.list).toHaveBeenCalledWith('ws_1', 'u_1', undefined, 20);
     });
 
     it('returns the lean dashboard shape with a floored stage', async () => {

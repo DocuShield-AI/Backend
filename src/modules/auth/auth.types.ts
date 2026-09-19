@@ -21,11 +21,9 @@ export interface JwtPayload {
 }
 
 /**
- * Shape attached to `req.user` on every authenticated request. The
- * @CurrentUser() decorator (Phase 3) reads from this, which is what finally
- * removes the hardcoded 'workspace-placeholder' from the contracts controller.
- * email lets a protected route (e.g. `/auth/me`) tell the frontend who is
- * signed in without the client ever seeing the raw token.
+ * Shape attached to `req.user` on every authenticated request; @CurrentUser()
+ * reads from this. email lets a protected route (e.g. /auth/me) tell the
+ * frontend who is signed in without the client ever seeing the raw token.
  */
 export interface AuthenticatedUser {
   userId: string;
