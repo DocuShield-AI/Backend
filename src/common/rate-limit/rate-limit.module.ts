@@ -1,9 +1,11 @@
 import { Global, Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
+import { RedisModule, RedisToken } from '@nestjs-redis/client';
+import { RedisThrottlerStorage } from '@nestjs-redis/throttler-storage';
 import { APP_GUARD } from '@nestjs/core';
 import { WorkspaceThrottlerGuard } from './workspace-throttler.guard';
+import type { RedisClientType } from 'redis';
 
 /**
  * Two-tier, Redis-backed rate limiting. In-memory throttling is rejected
@@ -13,12 +15,17 @@ import { WorkspaceThrottlerGuard } from './workspace-throttler.guard';
 @Module({
   imports: [
     ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        storage: new ThrottlerStorageRedisService(
-          config.getOrThrow<string>('REDIS_URL'),
-        ),
+      imports: [
+        RedisModule.forRootAsync({
+          inject: [ConfigService],
+          useFactory: (config: ConfigService) => ({
+            options: { url: config.getOrThrow<string>('REDIS_URL') },
+          }),
+        }),
+      ],
+      inject: [RedisToken(), ConfigService],
+      useFactory: (redis: RedisClientType, config: ConfigService) => ({
+        storage: new RedisThrottlerStorage(redis),
         throttlers: [
           // Tier 1 — per-IP (host): coarse flood control at the edge.
           {
